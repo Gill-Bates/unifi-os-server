@@ -398,8 +398,10 @@ build_extractor_image() {
 
     log "Phase 1: Building extractor image for linux/${arch}"
     
-    if ! docker build \
+    # Use DOCKER_DEFAULT_PLATFORM as additional safeguard for buildx
+    if ! DOCKER_DEFAULT_PLATFORM="linux/${arch}" docker build \
         --platform "linux/${arch}" \
+        --pull \
         --file "${REPO_ROOT}/docker/Dockerfile.extractor" \
         --tag "$extractor_tag" \
         --build-arg "UOS_INSTALLER_URL=${installer_url}" \
@@ -635,8 +637,10 @@ build_runtime_image() {
 
     log "Phase 4: Building runtime image for linux/${arch}"
 
-    if ! docker build \
+    # Use DOCKER_DEFAULT_PLATFORM as additional safeguard for buildx
+    if ! DOCKER_DEFAULT_PLATFORM="linux/${arch}" docker build \
         --platform "linux/${arch}" \
+        --pull \
         --file "${REPO_ROOT}/docker/Dockerfile.runtime" \
         --tag "$final_tag" \
         --build-arg "UOSSERVER_IMAGE=${uosserver_tag}" \
