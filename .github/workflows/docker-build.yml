@@ -67,12 +67,48 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Extract version from setup.conf
+        id: version
+        run: |
+          if [[ -f setup.conf ]]; then
+            VERSION=$(grep -oP '\d+\.\d+\.\d+' setup.conf | head -1 || echo "latest")
+          else
+            VERSION="latest"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Detected version: ${VERSION}"
+
       - name: Build preinstalled runtime image
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
           BUILD_DATE: ${{ github.event.repository.updated_at }}
-          PUSH: ${{ github.event_name != 'pull_request' && (github.event.inputs.push != 'false') && 'true' || 'false' }}
+          PUSH: 'false'
           PLATFORMS: linux/amd64
           UNIFI_OS_URL_X64: ${{ vars.UNIFI_OS_URL_X64 || steps.urls.outputs.url_x64 }}
           UNIFI_OS_URL_ARM64: ${{ vars.UNIFI_OS_URL_ARM64 || steps.urls.outputs.url_arm64 }}
         run: bash ./docker/build.sh
+
+      - name: Trivy vulnerability scan (amd64)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: '${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-amd64'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+          timeout: '10m'
+          trivyignores: '.trivyignore'
+
+      - name: Push image (if enabled)
+        if: github.event_name != 'pull_request' && github.event.inputs.push != 'false'
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          PLATFORMS: linux/amd64
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          docker push "${IMAGE_NAME}:${VERSION}-amd64"
+          docker tag "${IMAGE_NAME}:${VERSION}-amd64" "${IMAGE_NAME}:${VERSION}"
+          docker tag "${IMAGE_NAME}:${VERSION}-amd64" "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:${VERSION}"
+          docker push "${IMAGE_NAME}:latest"

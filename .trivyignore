@@ -1,0 +1,9 @@
+# Trivy ignore file for UniFi OS Server
+# CVEs listed here are either:
+# - False positives
+# - Cannot be fixed (upstream dependency from Ubiquiti)
+# - Accepted risk for this use case
+
+# Add CVEs to ignore here, one per line:
+# CVE-YYYY-NNNNN
+
