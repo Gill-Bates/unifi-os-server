@@ -11,3 +11,4 @@
 !setup.conf
 !docker-compose.yml
 !.dockerignore
+!unifi.conf

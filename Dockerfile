@@ -2,18 +2,28 @@
 # while Debian bookworm currently ships only 4.3.1.
 FROM debian:trixie-slim
 
+# Multi-architecture support - TARGETARCH is automatically set by Docker Buildx
+ARG TARGETARCH
+ARG TARGETVARIANT
+
 ARG APP_VERSION=""
 ARG BUILD_DATE=""
-ARG UOS_INSTALLER_URL="https://fw-download.ubnt.com/data/unifi-os-server/1856-linux-x64-5.0.6-33f4990f-6c68-4e72-9d9c-477496c22450.6-x64"
+# Architecture-specific installer URLs from Ubiquiti
+ARG UOS_INSTALLER_URL_AMD64="https://fw-download.ubnt.com/data/unifi-os-server/1856-linux-x64-5.0.6-33f4990f-6c68-4e72-9d9c-477496c22450.6-x64"
+ARG UOS_INSTALLER_URL_ARM64="https://fw-download.ubnt.com/data/unifi-os-server/df5b-linux-arm64-5.0.6-f35e944c-f4b6-4190-93a8-be61b96c58f4.6-arm64"
 ARG UOS_INSTALLER_CHECKSUM=""
 ARG UOS_UID="1000"
 
 LABEL org.opencontainers.image.title="unifi-os-server" \
 	org.opencontainers.image.version=${APP_VERSION} \
-	org.opencontainers.image.created=${BUILD_DATE}
+	org.opencontainers.image.created=${BUILD_DATE} \
+	org.opencontainers.image.source="https://github.com/giiibates/unifi-os-server" \
+	org.opencontainers.image.description="UniFi OS Server in Docker with multi-architecture support"
 
+# Set architecture-specific installer URL at runtime
 ENV DEBIAN_FRONTEND=noninteractive \
-	UOS_INSTALLER_URL=${UOS_INSTALLER_URL} \
+	UOS_INSTALLER_URL_AMD64=${UOS_INSTALLER_URL_AMD64} \
+	UOS_INSTALLER_URL_ARM64=${UOS_INSTALLER_URL_ARM64} \
 	UOS_INSTALLER_CHECKSUM=${UOS_INSTALLER_CHECKSUM} \
 	UOS_INSTALLER_PATH=/opt/uos/installer/uos-installer \
 	UOS_INSTALL_ON_BOOT=1 \
