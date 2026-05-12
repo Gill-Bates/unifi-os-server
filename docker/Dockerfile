@@ -42,6 +42,7 @@ RUN apt-get update \
 		iptables \
 		kmod \
 		passwd \
+		passt \
 		podman \
 		procps \
 		slirp4netns \

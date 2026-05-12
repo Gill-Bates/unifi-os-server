@@ -240,10 +240,12 @@ install_arch_image() {
     build_base_image "$arch" "$base_tag"
 
     log "Running privileged install container for linux/${arch}"
+    # --network host allows the inner podman container (using pasta networking) to bind ports
     docker run -d \
         --platform "linux/${arch}" \
         --name "$container_name" \
         --privileged \
+        --network host \
         --cgroupns=host \
         --tmpfs /run:exec \
         --tmpfs /run/lock \

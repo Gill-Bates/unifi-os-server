@@ -129,7 +129,7 @@ Der Agent analysiert:
 - Runtime-Abhängigkeiten
 - Persistenzanforderungen
 - gestartete Services
-
+- Schaut dazu auch in das Schwesterprojekt (https://github.com/lemker/unifi-os-server) für weitere Informationen die hilfreich sein könnten.
 ---
 
 ## Validation

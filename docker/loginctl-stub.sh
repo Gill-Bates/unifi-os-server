@@ -20,6 +20,17 @@ case "$1" in
         fi
         exit 0
         ;;
+    user-status)
+        # Fake a successful user-status to avoid the installer spinning
+        user="${2:-}"
+        if [ -n "$user" ]; then
+            uid=$(id -u "$user" 2>/dev/null || echo "1000")
+            printf '%s (%s)\n' "$user" "$uid"
+            printf '           State: active\n'
+            printf '            Unit: user-%s.slice\n' "$uid"
+        fi
+        exit 0
+        ;;
     *)
         if [ -x /usr/bin/loginctl.real ]; then
             exec /usr/bin/loginctl.real "$@"
