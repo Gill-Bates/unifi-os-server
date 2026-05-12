@@ -19,6 +19,11 @@ env:
   # Ubiquiti Download API - no browser needed!
   DOWNLOAD_API_URL: "https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server"
 
+# Prevent multiple concurrent runs - only one update check at a time
+concurrency:
+  group: unifi-os-update-check
+  cancel-in-progress: false
+
 jobs:
   check-version:
     name: Check for new version
