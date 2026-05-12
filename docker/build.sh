@@ -24,7 +24,7 @@ PLATFORMS="${PLATFORMS:-linux/amd64}"
 PUSH="${PUSH:-true}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 VERSION="${VERSION:-}"
-BUILD_ARTIFACTS_DIR="${BUILD_ARTIFACTS_DIR:-${REPO_ROOT}/build-artifacts}"
+BUILD_ARTIFACTS_DIR="${BUILD_ARTIFACTS_DIR:-/tmp/uos-build-$$}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -335,7 +335,7 @@ run_extraction() {
     local arch="$1"
     local extractor_tag="$2"
     local container_name="uos-extract-${arch}-$$"
-    local output_dir="${REPO_ROOT}/build-artifacts/extract-${arch}"
+    local output_dir="${BUILD_ARTIFACTS_DIR}/extract-${arch}"
 
     mkdir -p "$output_dir"
     cleanup_containers+=("$container_name")
@@ -798,7 +798,7 @@ build_arch_image() {
     log "╚══════════════════════════════════════════════════════════════╝"
 
     local extractor_tag uosserver_tar uosserver_tag final_tag
-    local output_dir="${REPO_ROOT}/build-artifacts/extract-${arch}"
+    local output_dir="${BUILD_ARTIFACTS_DIR}/extract-${arch}"
 
     # Phase 1: Build extractor
     extractor_tag=$(build_extractor_image "$arch" "$installer_url")
@@ -932,7 +932,7 @@ Environment variables:
     PLATFORMS              Target platforms (default: linux/amd64)
     PUSH                   Push images (default: true)
     SKIP_VALIDATION        Skip runtime validation (default: false)
-    BUILD_ARTIFACTS_DIR    Directory for artifacts (default: ./build-artifacts)
+    BUILD_ARTIFACTS_DIR    Directory for artifacts (default: /tmp/uos-build-PID)
 
 Architecture:
     Docker Host
