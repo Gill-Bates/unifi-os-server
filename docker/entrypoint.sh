@@ -86,6 +86,8 @@ has_uos_installation() {
 }
 
 ensure_layout() {
+    local -a owned_paths
+
     mkdir -p \
         "$(dirname "$installer_path")" \
         "$(dirname "$installer_lock_path")" \
@@ -99,8 +101,16 @@ ensure_layout() {
         "$uos_home/.local/share/containers/storage" \
         "$run_dir"
 
+    owned_paths=(
+        "$uos_home"
+        "$run_dir"
+        "$data_dir"
+        "$config_dir"
+        /var/log/uosserver
+    )
+
     if [[ $EUID -eq 0 ]]; then
-        chown -R "$uos_uid:$uos_uid" "$uos_home" "$run_dir"
+        chown -R "$uos_uid:$uos_uid" "${owned_paths[@]}"
     fi
 
     if [[ $EUID -eq 0 || -O "$run_dir" ]]; then

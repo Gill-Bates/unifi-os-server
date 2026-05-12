@@ -30,6 +30,35 @@ declare -a requested_platforms=()
 declare -a arch_image_tags=()
 declare -a cleanup_containers=()
 
+host_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)
+            printf 'amd64\n'
+            ;;
+        aarch64|arm64)
+            printf 'arm64\n'
+            ;;
+        *)
+            printf 'unknown\n'
+            ;;
+    esac
+}
+
+validate_requested_platforms() {
+    local native_arch
+    local platform
+    local requested_arch
+
+    native_arch="$(host_arch)"
+
+    for platform in "${requested_platforms[@]}"; do
+        requested_arch="${platform#linux/}"
+        if [[ "$requested_arch" != "$native_arch" ]]; then
+            error "Requested ${platform}, but this host is ${native_arch}. Preinstalled images must be built on a native runner for each architecture because the upstream installer uses rootless Podman, which fails under emulation with 'cannot clone: Invalid argument'. Use a native ${requested_arch} host or GitHub Actions runner, for example ubuntu-24.04-arm for arm64."
+        fi
+    done
+}
+
 log() {
     echo -e "${GREEN}[build]${NC} $*"
 }
@@ -183,7 +212,6 @@ install_arch_image() {
     local base_tag="${IMAGE_NAME}:base-${VERSION}-${arch}"
     local final_tag="${IMAGE_NAME}:${VERSION}-${arch}"
     local container_name="uos-preinstall-${arch}-$$"
-
     build_base_image "$arch" "$base_tag"
 
     log "Running privileged install container for linux/${arch}"
@@ -234,6 +262,11 @@ publish_manifests() {
         return
     fi
 
+    if (( ${#arch_image_tags[@]} < 2 )); then
+        warn "Built only ${#arch_image_tags[@]} architecture image; skipping multi-arch manifest creation"
+        return
+    fi
+
     log "Publishing multi-arch manifest ${IMAGE_NAME}:${VERSION}"
     docker buildx imagetools create -t "${IMAGE_NAME}:${VERSION}" "${arch_image_tags[@]}" >/dev/null
 
@@ -251,6 +284,7 @@ main() {
     require_cmd sed
 
     load_config
+    validate_requested_platforms
 
     log "Using installer URLs from ${SETUP_FILE}"
     log "Version: ${VERSION}"
@@ -283,18 +317,20 @@ if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
 Builds a fully installed UniFi OS Server image from the URLs in setup.conf.
 
 Usage:
-  ./build.sh
+    ./build.sh
 
 Environment variables:
   IMAGE_NAME             Target image name (default: giiibates/unifi-os-server)
   VERSION                Override version tag; otherwise derived from amd64 URL
   PLATFORMS              Comma-separated target platforms (default: linux/amd64,linux/arm64)
-  PUSH                   Push arch images and manifest lists (default: true)
+    PUSH                   Push arch images and manifest lists (default: true)
     SETUP_FILE             Path to URL config (default: <repo-root>/setup.conf)
   WAIT_TIMEOUT_SECONDS   Installer timeout per arch (default: 1800)
 
 The script builds a base image, runs the installer in a privileged container,
 commits the installed result, and publishes a multi-arch manifest.
+
+Each requested platform must be built on a native runner for that CPU architecture.
 EOF
     exit 0
 fi

@@ -52,6 +52,8 @@ PUSH=false ./build.sh
 
 The upstream installer binary is used only during the build container phase and is not part of the final published image.
 
+Important: preinstalling an architecture must happen on a native runner for that architecture. The upstream installer starts rootless Podman internally, and the arm64 path fails under QEMU/binfmt emulation with `cannot clone: Invalid argument`. For reliable multi-arch releases, run `linux/amd64` on an amd64 runner and `linux/arm64` on a native arm64 runner, then publish the manifest from those pushed arch tags.
+
 ### Base Image Only
 
 ```bash
