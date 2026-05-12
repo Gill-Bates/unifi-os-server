@@ -194,3 +194,64 @@ jobs:
           echo "Pushed manifests:"
           echo "  ${IMAGE_NAME}:${VERSION}"
           echo "  ${IMAGE_NAME}:latest"
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-amd64, create-manifest]
+    if: needs.create-manifest.result == 'success' && github.event.inputs.push != 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Create or update GitHub Release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ needs.build-amd64.outputs.version }}';
+            
+            const body = [
+              '## UniFi OS Server ' + version,
+              '',
+              '**Docker Image:** `docker pull giiibates/unifi-os-server:' + version + '`',
+              '',
+              '### Available Tags',
+              '- `giiibates/unifi-os-server:' + version + '` (multi-arch)',
+              '- `giiibates/unifi-os-server:' + version + '-amd64`',
+              '- `giiibates/unifi-os-server:' + version + '-arm64`',
+              '- `giiibates/unifi-os-server:latest`',
+              '',
+              '**Source:** [Ubiquiti Downloads](https://ui.com/download/software/unifi-os-server)'
+            ].join('\n');
+            
+            try {
+              await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: 'v' + version,
+                name: 'UniFi OS Server ' + version,
+                body: body,
+                draft: false,
+                prerelease: false
+              });
+              console.log('Created release v' + version);
+            } catch (e) {
+              if (e.status === 422) {
+                console.log('Release v' + version + ' already exists, updating...');
+                // Get existing release and update it
+                const { data: release } = await github.rest.repos.getReleaseByTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag: 'v' + version
+                });
+                await github.rest.repos.updateRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release.id,
+                  body: body
+                });
+                console.log('Updated release v' + version);
+              } else {
+                throw e;
+              }
+            }

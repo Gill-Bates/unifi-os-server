@@ -167,42 +167,4 @@ jobs:
               }
             });
             console.log('Triggered build workflow');
-
-      - name: Create GitHub Release
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const version = '${{ needs.check-version.outputs.latest_version }}';
-            const url_x64 = '${{ needs.check-version.outputs.url_x64 }}';
-            const url_arm64 = '${{ needs.check-version.outputs.url_arm64 }}';
-            
-            const body = [
-              '## UniFi OS Server ' + version,
-              '',
-              '**Docker Image:** `docker pull giiibates/unifi-os-server:' + version + '`',
-              '',
-              '### Download URLs',
-              '- [Linux x64](' + url_x64 + ')',
-              '- [Linux arm64](' + url_arm64 + ')',
-              '',
-              '**Source:** [Ubiquiti Downloads](https://ui.com/download/software/unifi-os-server)'
-            ].join('\n');
-            
-            try {
-              await github.rest.repos.createRelease({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                tag_name: 'v' + version,
-                name: 'UniFi OS Server ' + version,
-                body: body,
-                draft: false,
-                prerelease: false
-              });
-              console.log('Created release v' + version);
-            } catch (e) {
-              if (e.status === 422) {
-                console.log('Release v' + version + ' already exists');
-              } else {
-                throw e;
-              }
-            }
+            console.log('Release will be created after successful build.');
