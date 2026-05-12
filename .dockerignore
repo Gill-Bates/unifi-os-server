@@ -1,6 +1,5 @@
 # Keep UniFi installer binaries out of the Docker build context/cache.
 *-linux-x64-*
-*-linux-arm64-*
 
 # Keep the Docker build context minimal so installer binaries and runtime state
 # never end up in the local build cache.

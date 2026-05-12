@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 SETUP_FILE="${SETUP_FILE:-${REPO_ROOT}/setup.conf}"
 IMAGE_NAME="${IMAGE_NAME:-giiibates/unifi-os-server}"
-PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
+PLATFORMS="${PLATFORMS:-linux/amd64}"
 PUSH="${PUSH:-true}"
 BUILDER_NAME="${BUILDER_NAME:-uos-preinstall-builder}"
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-1800}"
@@ -25,7 +25,6 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
 fi
 
 amd64_url=""
-arm64_url=""
 declare -a requested_platforms=()
 declare -a arch_image_tags=()
 declare -a cleanup_containers=()
@@ -34,9 +33,6 @@ host_arch() {
     case "$(uname -m)" in
         x86_64|amd64)
             printf 'amd64\n'
-            ;;
-        aarch64|arm64)
-            printf 'arm64\n'
             ;;
         *)
             printf 'unknown\n'
@@ -51,11 +47,11 @@ validate_requested_platforms() {
 
     native_arch="$(host_arch)"
 
+    [[ "$native_arch" == "amd64" ]] || error "This project currently supports only linux/amd64 release builds. Run the build on a native amd64 host or runner."
+
     for platform in "${requested_platforms[@]}"; do
         requested_arch="${platform#linux/}"
-        if [[ "$requested_arch" != "$native_arch" ]]; then
-            error "Requested ${platform}, but this host is ${native_arch}. Preinstalled images must be built on a native runner for each architecture because the upstream installer uses rootless Podman, which fails under emulation with 'cannot clone: Invalid argument'. Use a native ${requested_arch} host or GitHub Actions runner, for example ubuntu-24.04-arm for arm64."
-        fi
+        [[ "$requested_arch" == "amd64" ]] || error "Unsupported platform: ${platform}. This project is currently amd64-only."
     done
 }
 
@@ -110,17 +106,11 @@ load_config() {
     (( ${#urls[@]} >= 1 )) || error "No UniFi OS installer URLs found in $SETUP_FILE"
 
     amd64_url="${urls[0]}"
-    arm64_url="${urls[1]:-}"
-
     if [[ -z "$VERSION" ]]; then
         VERSION="$(extract_version_from_url "$amd64_url")"
     fi
 
     IFS=',' read -r -a requested_platforms <<<"$PLATFORMS"
-
-    if [[ " $PLATFORMS " == *"linux/arm64"* ]] && [[ -z "$arm64_url" ]]; then
-        error "PLATFORMS requires linux/arm64, but setup.conf does not contain a second installer URL"
-    fi
 }
 
 check_buildx() {
@@ -128,10 +118,7 @@ check_buildx() {
 }
 
 setup_binfmt() {
-    if [[ "$PLATFORMS" == *"linux/arm64"* ]]; then
-        log "Ensuring arm64 emulation is available"
-        docker run --privileged --rm tonistiigi/binfmt --install arm64 >/dev/null
-    fi
+    return 0
 }
 
 setup_builder() {
@@ -156,9 +143,6 @@ installer_url_for_arch() {
         amd64)
             printf '%s\n' "$amd64_url"
             ;;
-        arm64)
-            printf '%s\n' "$arm64_url"
-            ;;
         *)
             error "Unsupported architecture: $arch"
             ;;
@@ -178,7 +162,6 @@ build_base_image() {
         --build-arg "APP_VERSION=${VERSION}" \
         --build-arg "BUILD_DATE=${BUILD_DATE}" \
         --build-arg "UOS_INSTALLER_URL_AMD64=${amd64_url}" \
-        --build-arg "UOS_INSTALLER_URL_ARM64=${arm64_url}" \
         "$REPO_ROOT"
 }
 
@@ -258,20 +241,20 @@ install_arch_image() {
 
 publish_manifests() {
     if [[ "$PUSH" != "true" ]]; then
-        warn "PUSH=false, skipping remote multi-arch manifest creation"
+        warn "PUSH=false, skipping remote publish step"
         return
     fi
 
-    if (( ${#arch_image_tags[@]} < 2 )); then
-        warn "Built only ${#arch_image_tags[@]} architecture image; skipping multi-arch manifest creation"
+    if (( ${#arch_image_tags[@]} == 1 )); then
+        log "Publishing single-arch tags ${IMAGE_NAME}:${VERSION} and ${IMAGE_NAME}:latest"
+        docker tag "${arch_image_tags[0]}" "${IMAGE_NAME}:${VERSION}"
+        docker tag "${arch_image_tags[0]}" "${IMAGE_NAME}:latest"
+        docker push "${IMAGE_NAME}:${VERSION}"
+        docker push "${IMAGE_NAME}:latest"
         return
     fi
 
-    log "Publishing multi-arch manifest ${IMAGE_NAME}:${VERSION}"
-    docker buildx imagetools create -t "${IMAGE_NAME}:${VERSION}" "${arch_image_tags[@]}" >/dev/null
-
-    log "Publishing multi-arch manifest ${IMAGE_NAME}:latest"
-    docker buildx imagetools create -t "${IMAGE_NAME}:latest" "${arch_image_tags[@]}" >/dev/null
+    warn "No image was built; skipping publish step"
 }
 
 main() {
@@ -322,15 +305,15 @@ Usage:
 Environment variables:
   IMAGE_NAME             Target image name (default: giiibates/unifi-os-server)
   VERSION                Override version tag; otherwise derived from amd64 URL
-  PLATFORMS              Comma-separated target platforms (default: linux/amd64,linux/arm64)
-    PUSH                   Push arch images and manifest lists (default: true)
+    PLATFORMS              Comma-separated target platforms (default: linux/amd64)
+    PUSH                   Push image tags (default: true)
     SETUP_FILE             Path to URL config (default: <repo-root>/setup.conf)
   WAIT_TIMEOUT_SECONDS   Installer timeout per arch (default: 1800)
 
 The script builds a base image, runs the installer in a privileged container,
-commits the installed result, and publishes a multi-arch manifest.
+commits the installed result, and publishes tags for the built architecture.
 
-Each requested platform must be built on a native runner for that CPU architecture.
+The active release path is currently limited to linux/amd64 on a native amd64 runner.
 EOF
     exit 0
 fi

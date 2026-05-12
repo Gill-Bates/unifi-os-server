@@ -3,7 +3,7 @@
 [![Docker Build](https://github.com/giiibates/unifi-os-server/actions/workflows/docker-build.yml/badge.svg)](https://github.com/giiibates/unifi-os-server/actions/workflows/docker-build.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/giiibates/unifi-os-server)](https://hub.docker.com/r/giiibates/unifi-os-server)
 
-Run UniFi OS Server in Docker with multi-architecture support (amd64 & arm64).
+Run UniFi OS Server in Docker with amd64 support.
 The published image is preinstalled during the maintainer build and does not download the upstream installer on first boot.
 
 ## Quick Start
@@ -13,46 +13,50 @@ docker pull giiibates/unifi-os-server:latest
 docker compose up -d
 ```
 
+The repository root contains the default [docker-compose.yml](/opt/unifi-os-server/docker-compose.yml), so the command above works directly from the project directory.
+
 ## Supported Architectures
 
 | Architecture | Tag |
 |--------------|-----|
 | x86_64 (amd64) | `giiibates/unifi-os-server:latest` |
-| ARM64 (aarch64) | `giiibates/unifi-os-server:latest` |
 
-The image automatically selects the correct architecture.
+The published image is currently amd64-only.
 
 ## Building Release Images
 
 ### Using build.sh (recommended)
 
 ```bash
-# 1. Put the upstream installer URLs into setup.conf
+# 1. Put the upstream amd64 installer URL into setup.conf
 # 2. Log in once
 docker login
 
-# 3. Build, preinstall, and push
+# 3. Build, preinstall, and push for the native host architecture
 ./build.sh
 
 # Optional: override the tag that is otherwise derived from the amd64 URL
 VERSION=5.0.6 ./build.sh
 
-# Optional: keep the arch-specific images only in the local Docker daemon
+# Optional: keep the arch-specific image only in the local Docker daemon
 PUSH=false ./build.sh
+
+# Optional: override the platform explicitly
+PLATFORMS=linux/amd64 ./build.sh
 ```
 
 `build.sh` does the full release flow automatically:
 
-1. Reads the amd64 and arm64 installer URLs from `setup.conf`
-2. Builds a base image for each platform
-3. Starts a privileged install container per architecture
+1. Reads the amd64 installer URL from `setup.conf`
+2. Builds a base image for the requested native platform
+3. Starts a privileged install container for that architecture
 4. Waits for the UniFi installation to finish
 5. Commits the installed filesystem into final runtime images
-6. Pushes arch tags and a multi-arch manifest
+6. Pushes the architecture tag plus `:version` and `:latest`
 
 The upstream installer binary is used only during the build container phase and is not part of the final published image.
 
-Important: preinstalling an architecture must happen on a native runner for that architecture. The upstream installer starts rootless Podman internally, and the arm64 path fails under QEMU/binfmt emulation with `cannot clone: Invalid argument`. For reliable multi-arch releases, run `linux/amd64` on an amd64 runner and `linux/arm64` on a native arm64 runner, then publish the manifest from those pushed arch tags.
+Important: the active release path is currently amd64-only. Run the build on an amd64 host or runner.
 
 ### Base Image Only
 

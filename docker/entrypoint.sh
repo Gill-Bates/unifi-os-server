@@ -1,31 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Detect architecture and select appropriate installer URL
-detect_arch() {
-    local arch
-    arch="$(uname -m)"
-    case "$arch" in
-        x86_64|amd64)
-            echo "amd64"
-            ;;
-        aarch64|arm64)
-            echo "arm64"
-            ;;
-        *)
-            echo "amd64"  # Default fallback
-            ;;
-    esac
-}
-
-DETECTED_ARCH="$(detect_arch)"
-
-# Select installer URL based on architecture
 if [[ -n "${UOS_INSTALLER_URL:-}" ]]; then
     # Explicit URL override takes precedence
     installer_url="${UOS_INSTALLER_URL}"
-elif [[ "$DETECTED_ARCH" == "arm64" ]] && [[ -n "${UOS_INSTALLER_URL_ARM64:-}" ]]; then
-    installer_url="${UOS_INSTALLER_URL_ARM64}"
 elif [[ -n "${UOS_INSTALLER_URL_AMD64:-}" ]]; then
     installer_url="${UOS_INSTALLER_URL_AMD64}"
 else
