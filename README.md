@@ -1,9 +1,12 @@
 <p align="center">
-  <a href="https://github.com/giiibates/unifi-os-server/actions/workflows/docker-build.yml">
-    <img src="https://github.com/giiibates/unifi-os-server/actions/workflows/docker-build.yml/badge.svg" alt="Docker Build">
+  <a href="https://github.com/Gill-Bates/unifi-os-server/releases">
+    <img src="https://img.shields.io/github/v/tag/Gill-Bates/unifi-os-server?label=version&color=blue" alt="Latest Version">
   </a>
-  <a href="https://github.com/giiibates/unifi-os-server/actions/workflows/check-updates.yml">
-    <img src="https://github.com/giiibates/unifi-os-server/actions/workflows/check-updates.yml/badge.svg" alt="Check Updates">
+  <a href="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/docker-build.yml">
+    <img src="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/docker-build.yml/badge.svg" alt="Docker Build">
+  </a>
+  <a href="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/check-updates.yml">
+    <img src="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/check-updates.yml/badge.svg" alt="Check Updates">
   </a>
   <a href="https://hub.docker.com/r/giiibates/unifi-os-server">
     <img src="https://img.shields.io/docker/pulls/giiibates/unifi-os-server" alt="Docker Pulls">
