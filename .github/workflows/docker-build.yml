@@ -60,11 +60,6 @@ jobs:
             image=moby/buildkit:latest
             network=host
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
@@ -124,11 +119,6 @@ jobs:
           driver-opts: |
             image=moby/buildkit:latest
             network=host
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'

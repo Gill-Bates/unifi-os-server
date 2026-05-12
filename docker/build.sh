@@ -20,7 +20,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-# Load .env if present
+# Save explicitly set environment variables (they take precedence over .env)
+_saved_IMAGE_NAME="${IMAGE_NAME:-}"
+_saved_PLATFORMS="${PLATFORMS:-}"
+_saved_PUSH="${PUSH:-}"
+_saved_DOWNLOAD_API_URL="${DOWNLOAD_API_URL:-}"
+
+# Load .env if present (provides defaults)
 if [[ -f "${REPO_ROOT}/.env" ]]; then
     # shellcheck disable=SC1091
     set -a
@@ -28,6 +34,13 @@ if [[ -f "${REPO_ROOT}/.env" ]]; then
     set +a
 fi
 
+# Restore explicitly set variables (override .env)
+[[ -n "$_saved_IMAGE_NAME" ]] && IMAGE_NAME="$_saved_IMAGE_NAME"
+[[ -n "$_saved_PLATFORMS" ]] && PLATFORMS="$_saved_PLATFORMS"
+[[ -n "$_saved_PUSH" ]] && PUSH="$_saved_PUSH"
+[[ -n "$_saved_DOWNLOAD_API_URL" ]] && DOWNLOAD_API_URL="$_saved_DOWNLOAD_API_URL"
+
+# Set defaults for anything still unset
 IMAGE_NAME="${IMAGE_NAME:-giiibates/unifi-os-server}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 PUSH="${PUSH:-true}"
