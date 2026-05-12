@@ -44,10 +44,15 @@ fi
 IMAGE_NAME="${IMAGE_NAME:-giiibates/unifi-os-server}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 PUSH="${PUSH:-true}"
-BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 VERSION="${VERSION:-}"
 BUILD_ARTIFACTS_DIR="${BUILD_ARTIFACTS_DIR:-/tmp/uos-build-$$}"
 DOWNLOAD_API_URL="${DOWNLOAD_API_URL:-https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server}"
+PRESERVE_FAILURE_CONTAINERS="${PRESERVE_FAILURE_CONTAINERS:-true}"
+
+# BUILD_DATE should be set externally for reproducible builds
+if [[ -z "${BUILD_DATE:-}" ]]; then
+    BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -248,6 +253,21 @@ cleanup() {
     local exit_code="${1:-$?}"
     trap - EXIT ERR
 
+    # On failure, preserve containers for debugging if PRESERVE_FAILURE_CONTAINERS=true
+    if (( exit_code != 0 )) && [[ "$PRESERVE_FAILURE_CONTAINERS" == "true" ]]; then
+        if (( ${#cleanup_containers[@]} > 0 )); then
+            warn "Preserving ${#cleanup_containers[@]} container(s) for failure analysis"
+            warn "Set PRESERVE_FAILURE_CONTAINERS=false to auto-remove on failure"
+            for container_name in "${cleanup_containers[@]}"; do
+                [[ -n "$container_name" ]] || continue
+                if container_exists "$container_name"; then
+                    diag "  Preserved: $container_name"
+                fi
+            done
+            exit "$exit_code"
+        fi
+    fi
+
     if (( ${#cleanup_containers[@]} > 0 )); then
         log "Cleaning up ${#cleanup_containers[@]} container(s)..."
         for container_name in "${cleanup_containers[@]}"; do
@@ -263,7 +283,8 @@ cleanup() {
 
 trap 'cleanup $?' EXIT
 
-# Helper to remove container from cleanup array (Befund 3.4)
+# Helper to remove container from cleanup array
+# (Prevents successful containers from being deleted on later failures)
 remove_from_cleanup() {
     local name="$1"
     local new_array=()
@@ -293,7 +314,7 @@ host_arch() {
     case "$(uname -m)" in
         x86_64|amd64) printf 'amd64\n' ;;
         aarch64|arm64) printf 'arm64\n' ;;
-        *) printf 'unknown\n' ;;
+        *) fatal "Unsupported host architecture: $(uname -m)" ;;
     esac
 }
 
@@ -328,8 +349,8 @@ can_emulate_arch() {
 fetch_urls_from_api() {
     log "Fetching latest URLs from Ubiquiti API..."
     local response
-    response=$(curl -sL "$DOWNLOAD_API_URL" 2>/dev/null) || {
-        error "Failed to fetch from API"
+    response=$(curl -fsSL --retry 3 --retry-delay 2 --max-time 30 "$DOWNLOAD_API_URL" 2>/dev/null) || {
+        error "Failed to fetch from API (curl exit: $?)"
         return 1
     }
     
@@ -586,7 +607,8 @@ run_extraction() {
 
     log "Extraction successful: ${output_dir}/uosserver.tar (${tar_size_mb}MB)"
 
-    # Cleanup container and remove from cleanup array (Befund 3.4)
+    # Cleanup container and remove from cleanup array
+    # (Container no longer needed for failure analysis)
     docker rm -f "$container_name" >/dev/null 2>&1 || true
     remove_from_cleanup "$container_name"
 
@@ -604,27 +626,44 @@ load_extracted_image() {
 
     log "Phase 3: Loading extracted image into Docker"
 
+    # Capture images before load to determine what's new
+    local before_images
+    before_images=$(docker images -q --no-trunc | sort -u)
+
     # Load the image
     local load_output
-    load_output=$(docker load -i "$tar_path" 2>&1)
+    load_output=$(docker load -i "$tar_path" 2>&1) || {
+        error "docker load failed"
+        echo "$load_output" >&2
+        return 1
+    }
     echo "$load_output" >&2
 
-    # Find what was loaded
-    local loaded_tag
-    loaded_tag=$(echo "$load_output" | grep -oP 'Loaded image: \K.*' | head -1 || true)
+    # Find what was loaded - prefer image ID comparison over regex parsing
+    local after_images new_image loaded_tag
+    after_images=$(docker images -q --no-trunc | sort -u)
+    new_image=$(comm -13 <(echo "$before_images") <(echo "$after_images") | head -1)
 
-    if [[ -z "$loaded_tag" ]]; then
-        # Try to find any uosserver image
-        loaded_tag=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep -E '^(localhost/)?uosserver:' | head -1 || true)
-    fi
-
-    if [[ -z "$loaded_tag" ]]; then
-        fatal "Failed to load image: no uosserver image found after docker load"
-    fi
-
-    # Tag with our target name
-    if [[ "$loaded_tag" != "$target_tag" ]]; then
-        docker tag "$loaded_tag" "$target_tag"
+    if [[ -n "$new_image" ]]; then
+        # Found new image by ID comparison - most reliable method
+        diag "Detected new image by ID: $new_image"
+        docker tag "$new_image" "$target_tag" || {
+            error "Failed to tag image $new_image as $target_tag"
+            return 1
+        }
+    else
+        # Fallback: parse docker load output
+        loaded_tag=$(echo "$load_output" | grep -oP 'Loaded image: \K.*' | head -1 || true)
+        if [[ -n "$loaded_tag" ]]; then
+            if [[ "$loaded_tag" != "$target_tag" ]]; then
+                docker tag "$loaded_tag" "$target_tag" || {
+                    error "Failed to tag $loaded_tag as $target_tag"
+                    return 1
+                }
+            fi
+        else
+            fatal "Failed to load image: could not identify loaded image"
+        fi
     fi
 
     # Verify
@@ -757,7 +796,8 @@ validate_runtime_image() {
         validation_result="degraded"
     fi
 
-    # --- Check 2: Verify critical services (Befund 3.1) ---
+    # --- Check 2: Verify critical services ---
+    # These services are expected in a healthy UniFi OS installation
     log "Check 2/4: Verifying critical services..."
     local critical_services=("unifi-core" "nginx" "mongodb" "postgresql@14-main")
     local services_ok=true
@@ -775,7 +815,8 @@ validate_runtime_image() {
         validation_result="degraded"
     fi
 
-    # --- Check 3: Verify listening ports (Befund 3.1) ---
+    # --- Check 3: Verify listening ports ---
+    # Expected ports for UniFi OS services
     log "Check 3/4: Verifying listening ports..."
     local expected_ports=("443" "8443" "8080" "27017")
     local ports_ok=true
@@ -793,7 +834,8 @@ validate_runtime_image() {
         validation_result="degraded"
     fi
 
-    # --- Check 4: Restart test (Befund 3.5) ---
+    # --- Check 4: Restart test ---
+    # Verify container survives a stop/start cycle (proves persistent state)
     log "Check 4/4: Restart test..."
     docker stop -t 30 "$container_name" >/dev/null 2>&1
     sleep 2
@@ -840,7 +882,8 @@ validate_runtime_image() {
 }
 
 #######################################
-# BUILD PROVENANCE (Befund 3.6)
+# BUILD PROVENANCE
+# Records build metadata for reproducibility and audit trails
 #######################################
 
 write_build_provenance() {
@@ -860,31 +903,45 @@ write_build_provenance() {
     local image_size
     image_size=$(docker image inspect --format '{{.Size}}' "$image_tag" 2>/dev/null || echo "0")
 
+    # Get hostname safely
+    local build_hostname
+    build_hostname=$(hostname 2>/dev/null || echo 'unknown')
+
     log "Writing build provenance to: $provenance_file"
 
-    cat > "$provenance_file" <<EOF
-{
-  "version": "${VERSION}",
-  "arch": "${arch}",
-  "image_tag": "${image_tag}",
-  "image_digest": "${image_digest}",
-  "image_size_bytes": ${image_size},
-  "built_at": "${BUILD_DATE}",
-  "installer_url": "${installer_url}",
-  "validation_result": "${validation_result}",
-  "capabilities_required": ["NET_ADMIN", "NET_RAW"],
-  "phases_completed": {
-    "extraction": true,
-    "load": true,
-    "runtime_build": true,
-    "validation": "${validation_result}"
-  },
-  "builder": {
-    "script": "docker/build.sh",
-    "hostname": "$(hostname 2>/dev/null || echo 'unknown')"
-  }
-}
-EOF
+    # Use jq for safe JSON generation (no escaping issues)
+    jq -n \
+        --arg version "$VERSION" \
+        --arg arch "$arch" \
+        --arg image_tag "$image_tag" \
+        --arg image_digest "$image_digest" \
+        --argjson image_size_bytes "$image_size" \
+        --arg built_at "$BUILD_DATE" \
+        --arg installer_url "$installer_url" \
+        --arg validation_result "$validation_result" \
+        --arg script "docker/build.sh" \
+        --arg hostname "$build_hostname" \
+        '{
+            version: $version,
+            arch: $arch,
+            image_tag: $image_tag,
+            image_digest: $image_digest,
+            image_size_bytes: $image_size_bytes,
+            built_at: $built_at,
+            installer_url: $installer_url,
+            validation_result: $validation_result,
+            capabilities_required: ["NET_ADMIN", "NET_RAW"],
+            phases_completed: {
+                extraction: true,
+                load: true,
+                runtime_build: true,
+                validation: $validation_result
+            },
+            builder: {
+                script: $script,
+                hostname: $hostname
+            }
+        }' > "$provenance_file"
 }
 
 #######################################
@@ -904,21 +961,32 @@ build_arch_image() {
     local output_dir="${BUILD_ARTIFACTS_DIR}/extract-${arch}"
 
     # Phase 1: Build extractor
-    extractor_tag=$(build_extractor_image "$arch" "$installer_url")
+    # Note: fatal() in subshell only exits subshell, so we check exit status
+    extractor_tag=$(build_extractor_image "$arch" "$installer_url") || {
+        fatal "Phase 1 (build extractor) failed for ${arch}"
+    }
 
     # Phase 2: Run extraction
-    uosserver_tar=$(run_extraction "$arch" "$extractor_tag")
+    uosserver_tar=$(run_extraction "$arch" "$extractor_tag") || {
+        fatal "Phase 2 (run extraction) failed for ${arch}"
+    }
 
     # Phase 3: Load image
-    uosserver_tag=$(load_extracted_image "$arch" "$uosserver_tar")
+    uosserver_tag=$(load_extracted_image "$arch" "$uosserver_tar") || {
+        fatal "Phase 3 (load image) failed for ${arch}"
+    }
 
     # Phase 4: Build runtime
-    final_tag=$(build_runtime_image "$arch" "$uosserver_tag")
+    final_tag=$(build_runtime_image "$arch" "$uosserver_tag") || {
+        fatal "Phase 4 (build runtime) failed for ${arch}"
+    }
 
     # Phase 5: Validate (optional)
     local validation_result="skipped"
     if [[ "${SKIP_VALIDATION:-false}" != "true" ]]; then
-        validation_result=$(validate_runtime_image "$arch" "$final_tag")
+        validation_result=$(validate_runtime_image "$arch" "$final_tag") || {
+            fatal "Phase 5 (validation) failed for ${arch}"
+        }
     else
         warn "Skipping validation (SKIP_VALIDATION=true)"
     fi
@@ -934,7 +1002,7 @@ build_arch_image() {
     docker rmi "$extractor_tag" >/dev/null 2>&1 || true
     rm -rf "$output_dir" 2>/dev/null || true
 
-    # Write build provenance (Befund 3.6)
+    # Write build provenance for reproducibility tracking
     write_build_provenance "$arch" "$installer_url" "$final_tag" "$validation_result"
 
     log "╔══════════════════════════════════════════════════════════════╗"
@@ -981,6 +1049,7 @@ main() {
     require_cmd docker
     require_cmd grep
     require_cmd sed
+    require_cmd jq
 
     load_config
     validate_requested_platforms
@@ -1037,6 +1106,8 @@ Environment variables:
     PUSH                   Push images (default: true)
     SKIP_VALIDATION        Skip runtime validation (default: false)
     BUILD_ARTIFACTS_DIR    Directory for artifacts (default: /tmp/uos-build-PID)
+    BUILD_DATE             ISO8601 timestamp for reproducible builds (default: current time)
+    PRESERVE_FAILURE_CONTAINERS  Keep containers on failure for debugging (default: true)
 
 Architecture:
     Docker Host
