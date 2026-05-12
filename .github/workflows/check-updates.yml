@@ -33,15 +33,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Install dependencies
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl jq
+          npm init -y
+          npm install playwright
+          npx playwright install chromium
 
       - name: Get current version from repository
         id: current
         run: |
-          # Extract version from setup.conf
           if [[ -f setup.conf ]]; then
             CURRENT_VERSION=$(grep -oP 'UNIFI_OS_URL_X64.*-(\d+\.\d+\.\d+)-' setup.conf | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "0.0.0")
           else
@@ -50,50 +55,69 @@ jobs:
           echo "Current version: $CURRENT_VERSION"
           echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Fetch latest version from Ubiquiti
+      - name: Fetch latest version from ui.com
         id: latest
         run: |
-          # The download page is JavaScript-rendered, but we can try to find a static API
-          # or parse the page content. Ubiquiti publishes releases at a predictable URL pattern.
+          cat > fetch-urls.js << 'SCRIPT'
+          const { chromium } = require('playwright');
+
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+            
+            console.error('Navigating to download page...');
+            await page.goto('https://ui.com/download/software/unifi-os-server', {
+              waitUntil: 'networkidle',
+              timeout: 60000
+            });
+            
+            // Wait for content to load
+            await page.waitForTimeout(5000);
+            
+            // Get all download links
+            const content = await page.content();
+            
+            // Extract URLs using regex
+            const x64Match = content.match(/https:\/\/fw-download\.ubnt\.com\/data\/unifi-os-server\/[a-z0-9]+-linux-x64-[\d.]+-[a-f0-9-]+\.\d+-x64/);
+            const arm64Match = content.match(/https:\/\/fw-download\.ubnt\.com\/data\/unifi-os-server\/[a-z0-9]+-linux-arm64-[\d.]+-[a-f0-9-]+\.\d+-arm64/);
+            
+            const result = {
+              url_x64: x64Match ? x64Match[0] : '',
+              url_arm64: arm64Match ? arm64Match[0] : '',
+              version: ''
+            };
+            
+            if (result.url_x64) {
+              const versionMatch = result.url_x64.match(/(\d+\.\d+\.\d+)/);
+              result.version = versionMatch ? versionMatch[1] : '';
+            }
+            
+            console.log(JSON.stringify(result));
+            
+            await browser.close();
+          })();
+          SCRIPT
           
-          # Method 1: Try to fetch the page and extract URLs
-          # The page uses JavaScript, so we need to be creative
+          echo "Running Playwright to fetch URLs..."
+          RESULT=$(node fetch-urls.js 2>/dev/null)
           
-          # Method 2: Use the known URL pattern and check if newer versions exist
-          # URLs follow pattern: https://fw-download.ubnt.com/data/unifi-os-server/XXXX-linux-x64-VERSION-UUID
-          
-          # For now, we'll use a simple approach: fetch the page HTML and grep for Linux URLs
-          echo "Fetching download page..."
-          
-          # Use curl with a browser user-agent to get the page
-          PAGE_CONTENT=$(curl -sL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" \
-            "https://ui.com/download/software/unifi-os-server" 2>/dev/null || echo "")
-          
-          if [[ -z "$PAGE_CONTENT" ]]; then
-            echo "Failed to fetch page, trying alternative method..."
-            # Fallback: check if we can access the releases API
-            PAGE_CONTENT=$(curl -sL "https://community.ui.com/releases?q=uosserver" 2>/dev/null || echo "")
+          if [[ -z "$RESULT" ]]; then
+            echo "Failed to fetch URLs from ui.com"
+            echo "version=" >> $GITHUB_OUTPUT
+            echo "url_x64=" >> $GITHUB_OUTPUT
+            echo "url_arm64=" >> $GITHUB_OUTPUT
+            exit 0
           fi
           
-          # Extract Linux x64 URL and version
-          # Pattern: fw-download.ubnt.com/data/unifi-os-server/XXXX-linux-x64-VERSION-UUID
-          URL_X64=$(echo "$PAGE_CONTENT" | grep -oP 'https://fw-download\.ubnt\.com/data/unifi-os-server/[a-z0-9]+-linux-x64-[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9-]+\.[0-9]+-x64' | head -1 || echo "")
-          URL_ARM64=$(echo "$PAGE_CONTENT" | grep -oP 'https://fw-download\.ubnt\.com/data/unifi-os-server/[a-z0-9]+-linux-arm64-[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9-]+\.[0-9]+-arm64' | head -1 || echo "")
+          URL_X64=$(echo "$RESULT" | jq -r '.url_x64')
+          URL_ARM64=$(echo "$RESULT" | jq -r '.url_arm64')
+          VERSION=$(echo "$RESULT" | jq -r '.version')
           
-          if [[ -n "$URL_X64" ]]; then
-            LATEST_VERSION=$(echo "$URL_X64" | grep -oP '\d+\.\d+\.\d+' | head -1)
-            echo "Found Linux x64 URL: $URL_X64"
-            echo "Found Linux arm64 URL: $URL_ARM64"
-            echo "Latest version: $LATEST_VERSION"
-          else
-            echo "Could not extract URLs from page, using fallback..."
-            # Fallback: use the URLs from setup.conf as baseline
-            LATEST_VERSION="${{ steps.current.outputs.version }}"
-            URL_X64=""
-            URL_ARM64=""
-          fi
+          echo "Found version: $VERSION"
+          echo "Found x64 URL: $URL_X64"
+          echo "Found arm64 URL: $URL_ARM64"
           
-          echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "url_x64=$URL_X64" >> $GITHUB_OUTPUT
           echo "url_arm64=$URL_ARM64" >> $GITHUB_OUTPUT
 
@@ -115,15 +139,13 @@ jobs:
           echo "url_x64=$URL_X64" >> $GITHUB_OUTPUT
           echo "url_arm64=$URL_ARM64" >> $GITHUB_OUTPUT
           
-          # Compare versions using sort -V
           if [[ "$FORCE" == "true" ]]; then
             echo "Force build requested"
             echo "new_version_available=true" >> $GITHUB_OUTPUT
-          elif [[ -z "$LATEST" || "$LATEST" == "0.0.0" ]]; then
+          elif [[ -z "$LATEST" || "$LATEST" == "null" ]]; then
             echo "Could not determine latest version"
             echo "new_version_available=false" >> $GITHUB_OUTPUT
           elif [[ "$CURRENT" != "$LATEST" ]]; then
-            # Check if LATEST is actually newer
             NEWER=$(printf '%s\n%s' "$CURRENT" "$LATEST" | sort -V | tail -1)
             if [[ "$NEWER" == "$LATEST" && "$NEWER" != "$CURRENT" ]]; then
               echo "New version available: $LATEST (current: $CURRENT)"
@@ -173,19 +195,14 @@ jobs:
           URL_ARM64="${{ needs.check-version.outputs.url_arm64 }}"
           VERSION="${{ needs.check-version.outputs.latest_version }}"
           
-          if [[ -n "$URL_X64" && -n "$URL_ARM64" ]]; then
+          if [[ -n "$URL_X64" ]]; then
             cat > setup.conf << EOF
+          # UniFi OS Server Build Configuration
+          # Auto-generated by check-updates workflow on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # Version: $VERSION
+
           export UNIFI_OS_URL_X64="$URL_X64"
           export UNIFI_OS_URL_ARM64="$URL_ARM64"
-
-          export UNIFI_DOWNLOAD_URL="https://ui.com/download/software/unifi-os-server"
-
-          # Build and push:
-          cd docker && ./build.sh
-
-          # Clean up Docker resources:
-          docker system prune -af
-          docker buildx prune -af
           EOF
             
             echo "Updated setup.conf with version $VERSION"
@@ -198,18 +215,10 @@ jobs:
       - name: Commit and push changes
         run: |
           VERSION="${{ needs.check-version.outputs.latest_version }}"
-          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
           git add setup.conf
-          git commit -m "chore: update to UniFi OS Server v${VERSION}
-
-          Automated update detected new version.
-          
-          - x64: ${{ needs.check-version.outputs.url_x64 }}
-          - arm64: ${{ needs.check-version.outputs.url_arm64 }}"
-          
+          git commit -m "Update to UniFi OS Server $VERSION" || exit 0
           git push
 
       - name: Trigger build workflow
@@ -222,40 +231,46 @@ jobs:
               workflow_id: 'docker-build.yml',
               ref: 'main',
               inputs: {
-                push: 'true'
+                push: 'true',
+                platforms: 'linux/amd64,linux/arm64'
               }
             });
-            console.log('Build workflow triggered');
+            console.log('Triggered build workflow');
 
-      - name: Create release notes issue
+      - name: Create GitHub Release
         uses: actions/github-script@v7
         with:
           script: |
             const version = '${{ needs.check-version.outputs.latest_version }}';
-            const body = `## UniFi OS Server ${version} Released
+            const url_x64 = '${{ needs.check-version.outputs.url_x64 }}';
+            const url_arm64 = '${{ needs.check-version.outputs.url_arm64 }}';
             
-            A new version of UniFi OS Server has been detected and the build has been triggered.
-            
+            const body = `## UniFi OS Server ${version}
+
+            **Docker Image:** \`docker pull giiibates/unifi-os-server:${version}\`
+
             ### Download URLs
-            - **x64**: ${{ needs.check-version.outputs.url_x64 }}
-            - **arm64**: ${{ needs.check-version.outputs.url_arm64 }}
+            - [Linux x64](${url_x64})
+            - [Linux arm64](${url_arm64})
+
+            **Source:** [Ubiquiti Downloads](https://ui.com/download/software/unifi-os-server)
+            `;
             
-            ### Release Notes
-            Check the official release notes: https://community.ui.com/releases/r/uosserver/${version}
-            
-            ### Docker Image
-            Once the build completes, the new image will be available at:
-            \`\`\`
-            docker pull giiibates/unifi-os-server:${version}
-            \`\`\`
-            
-            ---
-            *This issue was automatically created by the update checker workflow.*`;
-            
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🚀 UniFi OS Server ${version} - Automated Build Triggered`,
-              body: body,
-              labels: ['release', 'automated']
-            });
+            try {
+              await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: `v${version}`,
+                name: `UniFi OS Server ${version}`,
+                body: body,
+                draft: false,
+                prerelease: false
+              });
+              console.log(`Created release v${version}`);
+            } catch (e) {
+              if (e.status === 422) {
+                console.log(`Release v${version} already exists`);
+              } else {
+                throw e;
+              }
+            }
