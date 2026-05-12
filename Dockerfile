@@ -50,6 +50,7 @@ RUN apt-get update \
 		podman \
 		procps \
 		slirp4netns \
+		systemd \
 		tini \
 		uidmap \
 		util-linux \
@@ -63,16 +64,20 @@ RUN mkdir -p \
 		/var/lib/uosserver \
 		/var/log/uosserver \
 		/home/uosserver/.config/containers \
-		/home/uosserver/.local/share/containers/storage
+		/home/uosserver/.local/share/containers/storage \
+		/var/lib/systemd/linger \
+	&& touch /var/lib/systemd/linger/uosserver
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=755 loginctl-stub.sh /usr/local/bin/loginctl
 
-RUN chmod 755 /usr/local/bin/entrypoint.sh
+RUN mv /usr/bin/loginctl /usr/bin/loginctl.real 2>/dev/null || true \
+	&& ln -sf /usr/local/bin/loginctl /usr/bin/loginctl
 
 VOLUME ["/var/lib/uosserver", "/etc/uosserver", "/var/log/uosserver"]
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
-	CMD curl -fsSk https://localhost:443/ >/dev/null || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=900s --retries=5 \
+	CMD curl -fsSk https://localhost:8443/ >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 CMD []
