@@ -132,8 +132,10 @@ Bestimmte Rechte sind notwendig.
 ## 5. Native Builds bevorzugen
 
 - Separate Jobs für amd64 und arm64 in CI
-- QEMU nur für arm64 auf amd64-Runnern
-- Bei Emulator-Problemen native Runner bevorzugen
+- amd64: `runs-on: ubuntu-latest`
+- arm64: `runs-on: ubuntu-24.04-arm` (native Runner, kostenlos für Public Repos seit 2026)
+- QEMU nur für lokale Cross-Compilation, nicht in CI
+- Kein buildx/QEMU-Setup nötig für native Builds
 
 ---
 

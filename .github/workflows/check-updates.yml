@@ -164,8 +164,8 @@ jobs:
               ref: 'main',
               inputs: {
                 push: 'true',
-                platforms: 'linux/amd64'  // arm64 requires paid GitHub runners
+                platforms: 'linux/amd64,linux/arm64'  // Native runners for both platforms
               }
             });
-            console.log('Triggered build workflow');
+            console.log('Triggered build workflow for amd64 + arm64');
             console.log('Release will be created after successful build.');
