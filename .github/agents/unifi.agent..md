@@ -105,6 +105,7 @@ Bei Emulator- oder Podman-Problemen native Runner bevorzugen.
 
 # Bekannte Rahmenbedingungen
 
+- Bei Dockerfile: auf debian:trixie-slim bleiben wegen Podman-Image-Kompatibilität
 - Installer sind große Rust-Binaries
 - Installer enthalten ein eingebettetes Container-Image
 - Installer erwarten teilweise systemd-artige Umgebung

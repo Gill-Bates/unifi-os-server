@@ -95,6 +95,38 @@ extract_version_from_url() {
     printf '%s\n' "$version"
 }
 
+format_duration() {
+    local total_seconds="$1"
+    local hours minutes seconds
+
+    (( total_seconds >= 0 )) || total_seconds=0
+
+    hours=$((total_seconds / 3600))
+    minutes=$(((total_seconds % 3600) / 60))
+    seconds=$((total_seconds % 60))
+
+    if (( hours > 0 )); then
+        printf '%dh %02dm %02ds' "$hours" "$minutes" "$seconds"
+    elif (( minutes > 0 )); then
+        printf '%dm %02ds' "$minutes" "$seconds"
+    else
+        printf '%ds' "$seconds"
+    fi
+}
+
+truncate_progress_line() {
+    local line="$1"
+    local max_length=160
+
+    line="${line//$'\r'/}"
+    if (( ${#line} > max_length )); then
+        printf '%s...' "${line:0:max_length}"
+        return
+    fi
+
+    printf '%s' "$line"
+}
+
 load_config() {
     amd64_url="${UNIFI_OS_URL_X64:-}"
 
@@ -164,6 +196,10 @@ wait_for_installation() {
     local container_name="$1"
     local arch="$2"
     local deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
+    local started_at="$SECONDS"
+    local elapsed_seconds remaining_seconds
+    local latest_log_line=""
+    local last_reported_log_line=""
 
     while (( SECONDS < deadline )); do
         if ! docker ps --format '{{.Names}}' | grep -Fxq "$container_name"; then
@@ -171,12 +207,23 @@ wait_for_installation() {
             error "Install container for ${arch} exited before installation completed"
         fi
 
-        if docker exec "$container_name" sh -c 'test -x /usr/local/bin/uosserver || test -x /var/lib/uosserver/bin/uosserver-service' >/dev/null 2>&1; then
+        if docker exec "$container_name" sh -c 'test -f /run/uos-installer.done' >/dev/null 2>&1; then
             log "Installation finished for linux/${arch}"
             return 0
         fi
 
-        log "Waiting for installer on linux/${arch}..."
+        elapsed_seconds=$((SECONDS - started_at))
+        remaining_seconds=$((deadline - SECONDS))
+        latest_log_line="$(docker logs "$container_name" 2>&1 | tail -n 1 || true)"
+        latest_log_line="$(truncate_progress_line "$latest_log_line")"
+
+        if [[ -n "$latest_log_line" && "$latest_log_line" != "$last_reported_log_line" ]]; then
+            log "Installer progress on linux/${arch}: elapsed $(format_duration "$elapsed_seconds"), remaining $(format_duration "$remaining_seconds"), latest output: ${latest_log_line}"
+            last_reported_log_line="$latest_log_line"
+        else
+            log "Installer progress on linux/${arch}: elapsed $(format_duration "$elapsed_seconds"), remaining $(format_duration "$remaining_seconds"), no new installer output yet"
+        fi
+
         sleep "$POLL_INTERVAL_SECONDS"
     done
 

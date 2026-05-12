@@ -13,6 +13,7 @@ fi
 installer_path="${UOS_INSTALLER_PATH:-/opt/uos/installer/uos-installer}"
 installer_checksum="${UOS_INSTALLER_CHECKSUM:-}"
 installer_lock_path="${UOS_INSTALLER_LOCK_PATH:-/var/lock/uos-installer.lock}"
+installer_done_path="${UOS_INSTALLER_DONE_PATH:-/run/uos-installer.done}"
 install_on_boot="${UOS_INSTALL_ON_BOOT:-1}"
 force_install="${UOS_FORCE_INSTALL:-1}"
 network_mode="${UOS_NETWORK_MODE:-pasta}"
@@ -118,6 +119,8 @@ cgroup_manager = "cgroupfs"
 events_logger = "file"
 EOF
     fi
+
+    rm -f "$installer_done_path"
 }
 
 # Configure UOS_SYSTEM_IP for device adoption (from lemker/unifi-os-server)
@@ -285,11 +288,14 @@ main() {
                 log "removing installer binary to save disk space"
                 rm -f "$installer_path"
             fi
+            touch "$installer_done_path"
         else
             log "existing UOS installation detected; skipping installer"
+            touch "$installer_done_path"
         fi
     else
         log "UOS_INSTALL_ON_BOOT=$install_on_boot; skipping installer"
+        touch "$installer_done_path"
     fi
 
     if [[ $# -gt 0 ]]; then
