@@ -373,11 +373,23 @@ run_extraction() {
 
         case "$current_state" in
             running)
-                # Check if extraction completed
+                # Check if extraction completed - file must exist AND be stable
                 if [[ -f "${output_dir}/uosserver.tar" ]]; then
-                    log "Extraction artifact found while container running"
-                    success=true
-                    break
+                    local current_size prev_size
+                    current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
+                    
+                    # Wait for file to stop growing
+                    sleep 2
+                    prev_size=$current_size
+                    current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
+                    
+                    if (( current_size == prev_size && current_size > 500000000 )); then
+                        log "Extraction artifact found while container running (size stable at $((current_size / 1024 / 1024))MB)"
+                        success=true
+                        break
+                    elif (( current_size > 0 )); then
+                        diag "Tar file exists but still growing: $((current_size / 1024 / 1024))MB"
+                    fi
                 fi
 
                 # Show progress every 30 seconds
@@ -463,11 +475,18 @@ run_extraction() {
 
     local tar_size
     tar_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
-    if (( tar_size < 100000000 )); then  # Less than 100MB is suspicious
-        warn "Extracted image is suspiciously small: $((tar_size / 1024 / 1024))MB"
+    local tar_size_mb=$((tar_size / 1024 / 1024))
+    
+    if (( tar_size_mb < 500 )); then
+        error "Extracted image is too small: ${tar_size_mb}MB (expected >1500MB)"
+        error "This usually means the image import was not complete"
+        preserve_failure "$container_name" "$arch" "extraction" "Image too small: ${tar_size_mb}MB"
+        fatal "Extraction failed: incomplete image (${tar_size_mb}MB)"
+    elif (( tar_size_mb < 1000 )); then
+        warn "Extracted image is smaller than expected: ${tar_size_mb}MB (expected >1500MB)"
     fi
 
-    log "Extraction successful: ${output_dir}/uosserver.tar ($((tar_size / 1024 / 1024))MB)"
+    log "Extraction successful: ${output_dir}/uosserver.tar (${tar_size_mb}MB)"
 
     # Cleanup container and remove from cleanup array (Befund 3.4)
     docker rm -f "$container_name" >/dev/null 2>&1 || true

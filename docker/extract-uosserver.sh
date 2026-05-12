@@ -35,11 +35,28 @@ fi
 
 # Run installer (will fail at container start, but image is extracted)
 log "Running installer (expect it to fail at container startup)..."
-"$INSTALLER_PATH" --non-interactive --force-install || true
+"$INSTALLER_PATH" --non-interactive --force-install &
+INSTALLER_PID=$!
 
-# Wait for installer to complete image import
-# The installer runs podman in background, so we need to wait
-log "Waiting for podman image import to complete..."
+# Wait for installer process to complete
+log "Waiting for installer process (PID: $INSTALLER_PID) to complete..."
+wait $INSTALLER_PID || true
+log "Installer process finished"
+
+# Wait for any remaining podman processes (installer may spawn background jobs)
+log "Waiting for background podman processes..."
+for i in {1..30}; do
+    PODMAN_PROCS=$(pgrep -c podman 2>/dev/null || echo "0")
+    if (( PODMAN_PROCS == 0 )); then
+        log "No more podman processes running"
+        break
+    fi
+    log "Still $PODMAN_PROCS podman process(es) running, waiting... (${i}/30)"
+    sleep 5
+done
+
+# Additional settle time
+log "Waiting for filesystem to settle..."
 sleep 10
 
 # Find the uosserver storage directory
@@ -86,24 +103,37 @@ log "Using podman storage: $STORAGE_BASE"
 # Wait for image to be fully written
 # Check that overlay-images has content and isn't still being written
 log "Waiting for image data to be complete..."
-MAX_WAIT=120
+MAX_WAIT=300
 WAITED=0
+PREV_SIZE=0
+STABLE_COUNT=0
 while (( WAITED < MAX_WAIT )); do
-    # Count layers in storage
-    LAYER_COUNT=$(find "$STORAGE_BASE/overlay" -maxdepth 1 -type d 2>/dev/null | wc -l)
-    if (( LAYER_COUNT > 10 )); then
-        log "Found $LAYER_COUNT layers, checking if stable..."
-        sleep 5
-        NEW_COUNT=$(find "$STORAGE_BASE/overlay" -maxdepth 1 -type d 2>/dev/null | wc -l)
-        if (( NEW_COUNT == LAYER_COUNT )); then
-            log "Layer count stable at $LAYER_COUNT"
-            break
+    # Check total size of storage directory
+    STORAGE_SIZE=$(du -sm "$STORAGE_BASE" 2>/dev/null | cut -f1 || echo "0")
+    
+    if (( STORAGE_SIZE > 1000 )); then
+        log "Storage size: ${STORAGE_SIZE}MB"
+        if (( STORAGE_SIZE == PREV_SIZE )); then
+            STABLE_COUNT=$((STABLE_COUNT + 1))
+            if (( STABLE_COUNT >= 3 )); then
+                log "Storage size stable at ${STORAGE_SIZE}MB for 15s"
+                break
+            fi
+        else
+            STABLE_COUNT=0
         fi
+        PREV_SIZE=$STORAGE_SIZE
+    else
+        log "Storage size: ${STORAGE_SIZE}MB (waiting for >1000MB)..."
     fi
+    
     sleep 5
     WAITED=$((WAITED + 5))
-    log "Waiting for image import... (${WAITED}s)"
 done
+
+if (( STORAGE_SIZE < 1000 )); then
+    log "WARNING: Storage size only ${STORAGE_SIZE}MB after ${MAX_WAIT}s wait"
+fi
 
 # Get the image name from podman
 log "Listing images in storage..."
@@ -144,9 +174,12 @@ TAR_SIZE_MB=$((TAR_SIZE / 1024 / 1024))
 log "Exported tar size: ${TAR_SIZE_MB}MB"
 
 if (( TAR_SIZE_MB < 500 )); then
-    log "WARNING: Exported image is suspiciously small (${TAR_SIZE_MB}MB, expected >1500MB)"
+    log "ERROR: Exported image is too small (${TAR_SIZE_MB}MB, expected >1500MB)"
     log "Tar contents:"
     tar -tvf "$OUTPUT_TAR" 2>/dev/null | head -20 || true
+    log "This usually means the image import was not complete."
+    log "Storage directory size: $(du -sh "$STORAGE_BASE" 2>/dev/null || echo 'unknown')"
+    error "Image export failed - incomplete image"
 fi
 
 # Also save the image tag for the build script
