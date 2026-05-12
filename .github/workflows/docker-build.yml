@@ -58,4 +58,6 @@ jobs:
           BUILD_DATE: ${{ github.event.repository.updated_at }}
           PUSH: ${{ github.event_name != 'pull_request' && (github.event.inputs.push != 'false') && 'true' || 'false' }}
           PLATFORMS: linux/amd64
-        run: bash ./docker/build.sh
+          UNIFI_OS_URL_X64: ${{ vars.UNIFI_OS_URL_X64 }}
+          UNIFI_OS_URL_ARM64: ${{ vars.UNIFI_OS_URL_ARM64 }}
+        run: bash ./build.sh

@@ -10,7 +10,5 @@
 !docker/loginctl-stub.sh
 !docker/systemctl-stub.sh
 !README.md
-!setup.conf
-!docker-compose.yml
 !.dockerignore
 !unifi-os-server.conf

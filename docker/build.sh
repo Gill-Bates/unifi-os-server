@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Build fully installed UniFi OS Server images from the installer URLs in setup.conf.
+# Build fully installed UniFi OS Server images from environment-provided installer URLs.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-SETUP_FILE="${SETUP_FILE:-${REPO_ROOT}/setup.conf}"
 IMAGE_NAME="${IMAGE_NAME:-giiibates/unifi-os-server}"
 PLATFORMS="${PLATFORMS:-linux/amd64}"
 PUSH="${PUSH:-true}"
@@ -20,7 +19,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
-    printf '[build] This script must be executed, not sourced. Use ./docker/build.sh or bash ./docker/build.sh.\n' >&2
+    printf '[build] This script must be executed, not sourced. Use ./build.sh or bash ./build.sh.\n' >&2
     return 1 2>/dev/null || exit 1
 fi
 
@@ -97,15 +96,10 @@ extract_version_from_url() {
 }
 
 load_config() {
-    local urls
+    amd64_url="${UNIFI_OS_URL_X64:-}"
 
-    [[ -f "$SETUP_FILE" ]] || error "Config file not found: $SETUP_FILE"
+    [[ -n "$amd64_url" ]] || error "UNIFI_OS_URL_X64 is required"
 
-    mapfile -t urls < <(grep -E '^https://fw-download\.ubnt\.com/data/unifi-os-server/' "$SETUP_FILE")
-
-    (( ${#urls[@]} >= 1 )) || error "No UniFi OS installer URLs found in $SETUP_FILE"
-
-    amd64_url="${urls[0]}"
     if [[ -z "$VERSION" ]]; then
         VERSION="$(extract_version_from_url "$amd64_url")"
     fi
@@ -270,7 +264,7 @@ main() {
     load_config
     validate_requested_platforms
 
-    log "Using installer URLs from ${SETUP_FILE}"
+    log "Using installer URL from UNIFI_OS_URL_X64"
     log "Version: ${VERSION}"
     log "Platforms: ${PLATFORMS}"
     log "Push: ${PUSH}"
@@ -298,17 +292,18 @@ main() {
 
 if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
     cat <<EOF
-Builds a fully installed UniFi OS Server image from the URLs in setup.conf.
+Builds a fully installed UniFi OS Server image from installer URLs provided via environment variables.
 
 Usage:
-    ./docker/build.sh
+        ./build.sh
 
 Environment variables:
+    UNIFI_OS_URL_X64      amd64 installer URL (required)
+    UNIFI_OS_URL_ARM64    Reserved for a future arm64 build path
   IMAGE_NAME             Target image name (default: giiibates/unifi-os-server)
   VERSION                Override version tag; otherwise derived from amd64 URL
   PLATFORMS              Comma-separated target platforms (default: linux/amd64)
   PUSH                   Push image tags (default: true)
-  SETUP_FILE             Path to URL config (default: <repo-root>/setup.conf)
   WAIT_TIMEOUT_SECONDS   Installer timeout per arch (default: 1800)
 
 The script builds a base image, runs the installer in a privileged container,

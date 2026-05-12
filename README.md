@@ -10,10 +10,10 @@ The published image is preinstalled during the maintainer build and does not dow
 
 ```bash
 docker pull giiibates/unifi-os-server:latest
-docker compose up -d
+docker compose -f docker/docker-compose.yml up -d
 ```
 
-The repository root contains the default [docker-compose.yml](/opt/unifi-os-server/docker-compose.yml), so the command above works directly from the project directory.
+The runtime compose file lives in [docker/docker-compose.yml](/opt/unifi-os-server/docker/docker-compose.yml).
 
 ## Supported Architectures
 
@@ -25,29 +25,34 @@ The published image is currently amd64-only.
 
 ## Building Release Images
 
-### Using docker/build.sh (recommended)
+### Using build.sh (recommended)
 
 ```bash
-# 1. Put the upstream amd64 installer URL into setup.conf
+# 1. Export the upstream installer URL
+export UNIFI_OS_URL_X64="https://fw-download.ubnt.com/data/unifi-os-server/...-x64"
+
+# Optional: keep arm64 URL beside it for later use
+export UNIFI_OS_URL_ARM64="https://fw-download.ubnt.com/data/unifi-os-server/...-arm64"
+
 # 2. Log in once
 docker login
 
 # 3. Build, preinstall, and push for the native host architecture
-./docker/build.sh
+./build.sh
 
 # Optional: override the tag that is otherwise derived from the amd64 URL
-VERSION=5.0.6 ./docker/build.sh
+VERSION=5.0.6 ./build.sh
 
 # Optional: keep the arch-specific image only in the local Docker daemon
-PUSH=false ./docker/build.sh
+PUSH=false ./build.sh
 
 # Optional: override the platform explicitly
-PLATFORMS=linux/amd64 ./docker/build.sh
+PLATFORMS=linux/amd64 ./build.sh
 ```
 
-`docker/build.sh` does the full release flow automatically:
+`build.sh` does the full release flow automatically:
 
-1. Reads the amd64 installer URL from `setup.conf`
+1. Reads the amd64 installer URL from `UNIFI_OS_URL_X64`
 2. Builds a base image for the requested native platform
 3. Starts a privileged install container for that architecture
 4. Waits for the UniFi installation to finish
@@ -55,6 +60,8 @@ PLATFORMS=linux/amd64 ./docker/build.sh
 6. Pushes the architecture tag plus `:version` and `:latest`
 
 The upstream installer binary is used only during the build container phase and is not part of the final published image.
+
+If you want to keep the exports in a file locally, you can put them into [setup.conf](/opt/unifi-os-server/setup.conf) and load them with `source setup.conf` before running `./build.sh`.
 
 Important: the active release path is currently amd64-only. Run the build on an amd64 host or runner.
 
