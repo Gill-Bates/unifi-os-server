@@ -49,6 +49,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq
 
+      - name: Load URLs from setup.conf (fallback)
+        id: urls
+        run: |
+          # Load from setup.conf if repository variables are not set
+          if [[ -f setup.conf ]]; then
+            source setup.conf
+            echo "url_x64=${UNIFI_OS_URL_X64}" >> $GITHUB_OUTPUT
+            echo "url_arm64=${UNIFI_OS_URL_ARM64}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -63,6 +73,6 @@ jobs:
           BUILD_DATE: ${{ github.event.repository.updated_at }}
           PUSH: ${{ github.event_name != 'pull_request' && (github.event.inputs.push != 'false') && 'true' || 'false' }}
           PLATFORMS: linux/amd64
-          UNIFI_OS_URL_X64: ${{ vars.UNIFI_OS_URL_X64 }}
-          UNIFI_OS_URL_ARM64: ${{ vars.UNIFI_OS_URL_ARM64 }}
+          UNIFI_OS_URL_X64: ${{ vars.UNIFI_OS_URL_X64 || steps.urls.outputs.url_x64 }}
+          UNIFI_OS_URL_ARM64: ${{ vars.UNIFI_OS_URL_ARM64 || steps.urls.outputs.url_arm64 }}
         run: bash ./docker/build.sh
