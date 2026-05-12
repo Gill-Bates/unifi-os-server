@@ -1,16 +1,6 @@
 name: Build and Push Docker Image
 
 on:
-  push:
-    branches:
-      - main
-      - master
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
-      - master
   workflow_dispatch:
     inputs:
       push:
@@ -61,7 +51,7 @@ jobs:
             network=host
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
+        if: github.event.inputs.push != 'false'
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -94,7 +84,7 @@ jobs:
           trivyignores: '.trivyignore'
 
       - name: Push amd64 image
-        if: github.event_name != 'pull_request' && github.event.inputs.push != 'false'
+        if: github.event.inputs.push != 'false'
         run: |
           VERSION="${{ steps.build.outputs.version }}"
           docker push "${IMAGE_NAME}:${VERSION}-amd64"
@@ -121,7 +111,7 @@ jobs:
             network=host
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
+        if: github.event.inputs.push != 'false'
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -152,7 +142,7 @@ jobs:
           trivyignores: '.trivyignore'
 
       - name: Push arm64 image
-        if: github.event_name != 'pull_request' && github.event.inputs.push != 'false'
+        if: github.event.inputs.push != 'false'
         run: |
           VERSION="${{ steps.build.outputs.version }}"
           docker push "${IMAGE_NAME}:${VERSION}-arm64"
@@ -160,7 +150,7 @@ jobs:
   create-manifest:
     name: Create multi-arch manifest
     needs: [build-amd64, build-arm64]
-    if: always() && needs.build-amd64.result == 'success' && github.event_name != 'pull_request' && github.event.inputs.push != 'false'
+    if: always() && needs.build-amd64.result == 'success' && github.event.inputs.push != 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: read
