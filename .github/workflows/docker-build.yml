@@ -21,6 +21,15 @@ on:
         options:
           - 'true'
           - 'false'
+      platforms:
+        description: 'Platforms to build'
+        required: false
+        default: 'linux/amd64,linux/arm64'
+        type: choice
+        options:
+          - 'linux/amd64'
+          - 'linux/arm64'
+          - 'linux/amd64,linux/arm64'
 
 env:
   REGISTRY: docker.io
@@ -30,6 +39,8 @@ jobs:
   build-amd64:
     name: Build amd64 image
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.build.outputs.version }}
     permissions:
       contents: read
 
@@ -49,15 +60,70 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq
 
-      - name: Load URLs from setup.conf (fallback)
-        id: urls
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build amd64 image (auto-fetch URLs)
+        id: build
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          PUSH: 'false'
+          PLATFORMS: linux/amd64
         run: |
-          # Load from setup.conf if repository variables are not set
-          if [[ -f setup.conf ]]; then
-            source setup.conf
-            echo "url_x64=${UNIFI_OS_URL_X64}" >> $GITHUB_OUTPUT
-            echo "url_arm64=${UNIFI_OS_URL_ARM64}" >> $GITHUB_OUTPUT
-          fi
+          bash ./docker/build.sh
+          # Extract version from built image
+          VERSION=$(docker images --format '{{.Tag}}' "$IMAGE_NAME" | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "latest")
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Built version: ${VERSION}"
+
+      - name: Trivy vulnerability scan (amd64)
+        uses: aquasecurity/trivy-action@0.35.0
+        with:
+          image-ref: '${{ env.IMAGE_NAME }}:${{ steps.build.outputs.version }}-amd64'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+          timeout: '10m'
+          trivyignores: '.trivyignore'
+
+      - name: Push amd64 image
+        if: github.event_name != 'pull_request' && github.event.inputs.push != 'false'
+        run: |
+          VERSION="${{ steps.build.outputs.version }}"
+          docker push "${IMAGE_NAME}:${VERSION}-amd64"
+
+  build-arm64:
+    name: Build arm64 image
+    runs-on: ubuntu-latest
+    if: github.event.inputs.platforms == 'linux/arm64' || github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'
@@ -67,31 +133,21 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract version from setup.conf
-        id: version
-        run: |
-          if [[ -f setup.conf ]]; then
-            VERSION=$(grep -oP '\d+\.\d+\.\d+' setup.conf | head -1 || echo "latest")
-          else
-            VERSION="latest"
-          fi
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Detected version: ${VERSION}"
-
-      - name: Build preinstalled runtime image
+      - name: Build arm64 image (auto-fetch URLs)
+        id: build
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          BUILD_DATE: ${{ github.event.repository.updated_at }}
           PUSH: 'false'
-          PLATFORMS: linux/amd64
-          UNIFI_OS_URL_X64: ${{ vars.UNIFI_OS_URL_X64 || steps.urls.outputs.url_x64 }}
-          UNIFI_OS_URL_ARM64: ${{ vars.UNIFI_OS_URL_ARM64 || steps.urls.outputs.url_arm64 }}
-        run: bash ./docker/build.sh
+          PLATFORMS: linux/arm64
+        run: |
+          bash ./docker/build.sh
+          VERSION=$(docker images --format '{{.Tag}}' "$IMAGE_NAME" | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "latest")
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
-      - name: Trivy vulnerability scan (amd64)
+      - name: Trivy vulnerability scan (arm64)
         uses: aquasecurity/trivy-action@0.35.0
         with:
-          image-ref: '${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}-amd64'
+          image-ref: '${{ env.IMAGE_NAME }}:${{ steps.build.outputs.version }}-arm64'
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true
@@ -100,15 +156,56 @@ jobs:
           timeout: '10m'
           trivyignores: '.trivyignore'
 
-      - name: Push image (if enabled)
+      - name: Push arm64 image
         if: github.event_name != 'pull_request' && github.event.inputs.push != 'false'
-        env:
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          PLATFORMS: linux/amd64
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          docker push "${IMAGE_NAME}:${VERSION}-amd64"
-          docker tag "${IMAGE_NAME}:${VERSION}-amd64" "${IMAGE_NAME}:${VERSION}"
-          docker tag "${IMAGE_NAME}:${VERSION}-amd64" "${IMAGE_NAME}:latest"
-          docker push "${IMAGE_NAME}:${VERSION}"
-          docker push "${IMAGE_NAME}:latest"
+          VERSION="${{ steps.build.outputs.version }}"
+          docker push "${IMAGE_NAME}:${VERSION}-arm64"
+
+  create-manifest:
+    name: Create multi-arch manifest
+    needs: [build-amd64, build-arm64]
+    if: always() && needs.build-amd64.result == 'success' && github.event_name != 'pull_request' && github.event.inputs.push != 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push manifest
+        run: |
+          VERSION="${{ needs.build-amd64.outputs.version }}"
+          
+          # Check which images are available
+          IMAGES=""
+          if docker manifest inspect "${IMAGE_NAME}:${VERSION}-amd64" > /dev/null 2>&1; then
+            IMAGES="${IMAGE_NAME}:${VERSION}-amd64"
+          fi
+          if docker manifest inspect "${IMAGE_NAME}:${VERSION}-arm64" > /dev/null 2>&1; then
+            IMAGES="${IMAGES} ${IMAGE_NAME}:${VERSION}-arm64"
+          fi
+          
+          if [[ -z "$IMAGES" ]]; then
+            echo "No images available for manifest"
+            exit 1
+          fi
+          
+          echo "Creating manifest with: $IMAGES"
+          
+          # Create version manifest
+          docker manifest create "${IMAGE_NAME}:${VERSION}" $IMAGES --amend
+          docker manifest push "${IMAGE_NAME}:${VERSION}"
+          
+          # Create latest manifest
+          docker manifest create "${IMAGE_NAME}:latest" $IMAGES --amend
+          docker manifest push "${IMAGE_NAME}:latest"
+          
+          echo "Pushed manifests:"
+          echo "  ${IMAGE_NAME}:${VERSION}"
+          echo "  ${IMAGE_NAME}:latest"

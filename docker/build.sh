@@ -38,6 +38,7 @@ if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
 fi
 
 amd64_url=""
+arm64_url=""
 declare -a requested_platforms=()
 declare -a arch_image_tags=()
 declare -a cleanup_containers=()
@@ -273,21 +274,76 @@ host_arch() {
     esac
 }
 
+#######################################
+# AUTO-FETCH URLS FROM UI.COM
+#######################################
+
+fetch_latest_urls() {
+    log "Fetching latest UniFi OS Server URLs from ui.com..."
+    
+    local page_content
+    page_content=$(curl -sL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" \
+        "https://ui.com/download/software/unifi-os-server" 2>/dev/null || echo "")
+    
+    if [[ -z "$page_content" ]]; then
+        fatal "Failed to fetch download page from ui.com"
+    fi
+    
+    # Extract Linux x64 URL
+    local url_x64
+    url_x64=$(echo "$page_content" | grep -oP 'https://fw-download\.ubnt\.com/data/unifi-os-server/[a-z0-9]+-linux-x64-[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9-]+\.[0-9]+-x64' | head -1 || echo "")
+    
+    # Extract Linux arm64 URL
+    local url_arm64
+    url_arm64=$(echo "$page_content" | grep -oP 'https://fw-download\.ubnt\.com/data/unifi-os-server/[a-z0-9]+-linux-arm64-[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9-]+\.[0-9]+-arm64' | head -1 || echo "")
+    
+    if [[ -z "$url_x64" ]]; then
+        fatal "Could not extract x64 URL from ui.com download page"
+    fi
+    
+    log "Found x64 URL: $url_x64"
+    if [[ -n "$url_arm64" ]]; then
+        log "Found arm64 URL: $url_arm64"
+    else
+        warn "arm64 URL not found on download page"
+    fi
+    
+    amd64_url="$url_x64"
+    arm64_url="$url_arm64"
+}
+
 validate_requested_platforms() {
-    local native_arch
-    native_arch="$(host_arch)"
-
-    [[ "$native_arch" == "amd64" ]] || fatal "This project currently supports only linux/amd64 release builds."
-
     for platform in "${requested_platforms[@]}"; do
         local requested_arch="${platform#linux/}"
-        [[ "$requested_arch" == "amd64" ]] || fatal "Unsupported platform: ${platform}. This project is currently amd64-only."
+        case "$requested_arch" in
+            amd64)
+                [[ -n "$amd64_url" ]] || fatal "amd64 URL not available"
+                ;;
+            arm64)
+                [[ -n "$arm64_url" ]] || fatal "arm64 URL not available (set UNIFI_OS_URL_ARM64 or check ui.com)"
+                ;;
+            *)
+                fatal "Unsupported platform: ${platform}. Supported: linux/amd64, linux/arm64"
+                ;;
+        esac
     done
 }
 
 load_config() {
     amd64_url="${UNIFI_OS_URL_X64:-}"
-    [[ -n "$amd64_url" ]] || fatal "UNIFI_OS_URL_X64 is required"
+    arm64_url="${UNIFI_OS_URL_ARM64:-}"
+    
+    # Auto-fetch URLs if not provided
+    if [[ -z "$amd64_url" && -z "$arm64_url" ]]; then
+        fetch_latest_urls
+    elif [[ -z "$amd64_url" ]]; then
+        # Only arm64 provided, fetch x64 for version extraction
+        fetch_latest_urls
+        # But use provided arm64 URL if explicitly set
+        [[ -n "${UNIFI_OS_URL_ARM64:-}" ]] && arm64_url="${UNIFI_OS_URL_ARM64}"
+    fi
+    
+    [[ -n "$amd64_url" ]] || fatal "Could not determine x64 URL"
 
     if [[ -z "$VERSION" ]]; then
         VERSION="$(extract_version_from_url "$amd64_url")"
@@ -300,6 +356,7 @@ installer_url_for_arch() {
     local arch="$1"
     case "$arch" in
         amd64) printf '%s\n' "$amd64_url" ;;
+        arm64) printf '%s\n' "$arm64_url" ;;
         *) fatal "Unsupported architecture: $arch" ;;
     esac
 }
@@ -926,10 +983,11 @@ Usage:
     ./build.sh
 
 Environment variables:
-    UNIFI_OS_URL_X64       amd64 installer URL (required)
+    UNIFI_OS_URL_X64       amd64 installer URL (auto-fetched from ui.com if not set)
+    UNIFI_OS_URL_ARM64     arm64 installer URL (auto-fetched from ui.com if not set)
     IMAGE_NAME             Target image name (default: giiibates/unifi-os-server)
     VERSION                Override version tag (derived from URL if not set)
-    PLATFORMS              Target platforms (default: linux/amd64)
+    PLATFORMS              Target platforms (default: linux/amd64, supports: linux/amd64,linux/arm64)
     PUSH                   Push images (default: true)
     SKIP_VALIDATION        Skip runtime validation (default: false)
     BUILD_ARTIFACTS_DIR    Directory for artifacts (default: /tmp/uos-build-PID)
