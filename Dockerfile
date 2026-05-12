@@ -63,16 +63,21 @@ RUN mkdir -p \
 		/var/lib/containers/storage \
 		/var/lib/uosserver \
 		/var/log/uosserver \
+		/home/uosserver \
 		/home/uosserver/.config/containers \
 		/home/uosserver/.local/share/containers/storage \
 		/var/lib/systemd/linger \
-	&& touch /var/lib/systemd/linger/uosserver
+	&& touch /var/lib/systemd/linger/uosserver \
+	&& chown -R "${UOS_UID}:${UOS_UID}" /home/uosserver
 
-COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY --chmod=755 loginctl-stub.sh /usr/local/bin/loginctl
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=755 build/loginctl-stub.sh /usr/local/bin/loginctl
+COPY --chmod=755 build/systemctl-stub.sh /usr/local/bin/systemctl
 
 RUN mv /usr/bin/loginctl /usr/bin/loginctl.real 2>/dev/null || true \
-	&& ln -sf /usr/local/bin/loginctl /usr/bin/loginctl
+	&& ln -sf /usr/local/bin/loginctl /usr/bin/loginctl \
+	&& mv /usr/bin/systemctl /usr/bin/systemctl.real 2>/dev/null || true \
+	&& ln -sf /usr/local/bin/systemctl /usr/bin/systemctl
 
 VOLUME ["/var/lib/uosserver", "/etc/uosserver", "/var/log/uosserver"]
 

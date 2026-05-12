@@ -6,8 +6,9 @@
 # never end up in the local build cache.
 *
 !Dockerfile
-!entrypoint.sh
-!loginctl-stub.sh
+!docker/entrypoint.sh
+!build/loginctl-stub.sh
+!build/systemctl-stub.sh
 !README.md
 !setup.conf
 !docker-compose.yml

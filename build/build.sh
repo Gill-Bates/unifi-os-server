@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SETUP_FILE="${SETUP_FILE:-${SCRIPT_DIR}/setup.conf}"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+SETUP_FILE="${SETUP_FILE:-${REPO_ROOT}/setup.conf}"
 IMAGE_NAME="${IMAGE_NAME:-giiibates/unifi-os-server}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 PUSH="${PUSH:-true}"
@@ -149,7 +150,7 @@ build_base_image() {
         --build-arg "BUILD_DATE=${BUILD_DATE}" \
         --build-arg "UOS_INSTALLER_URL_AMD64=${amd64_url}" \
         --build-arg "UOS_INSTALLER_URL_ARM64=${arm64_url}" \
-        "$SCRIPT_DIR"
+        "$REPO_ROOT"
 }
 
 wait_for_installation() {
@@ -289,7 +290,7 @@ Environment variables:
   VERSION                Override version tag; otherwise derived from amd64 URL
   PLATFORMS              Comma-separated target platforms (default: linux/amd64,linux/arm64)
   PUSH                   Push arch images and manifest lists (default: true)
-  SETUP_FILE             Path to URL config (default: ./setup.conf)
+    SETUP_FILE             Path to URL config (default: <repo-root>/setup.conf)
   WAIT_TIMEOUT_SECONDS   Installer timeout per arch (default: 1800)
 
 The script builds a base image, runs the installer in a privileged container,

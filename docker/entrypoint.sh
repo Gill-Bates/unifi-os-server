@@ -94,9 +94,14 @@ ensure_layout() {
         /etc/containers \
         /var/lib/containers/storage \
         /var/log/uosserver \
+        "$uos_home" \
         "$uos_home/.config/containers" \
         "$uos_home/.local/share/containers/storage" \
         "$run_dir"
+
+    if [[ $EUID -eq 0 ]]; then
+        chown -R "$uos_uid:$uos_uid" "$uos_home" "$run_dir"
+    fi
 
     if [[ $EUID -eq 0 || -O "$run_dir" ]]; then
         chmod 700 "$run_dir"
