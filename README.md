@@ -4,6 +4,7 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/giiibates/unifi-os-server)](https://hub.docker.com/r/giiibates/unifi-os-server)
 
 Run UniFi OS Server in Docker with multi-architecture support (amd64 & arm64).
+The published image is preinstalled during the maintainer build and does not download the upstream installer on first boot.
 
 ## Quick Start
 
@@ -21,36 +22,53 @@ docker compose up -d
 
 The image automatically selects the correct architecture.
 
-## Building Locally
+## Building Release Images
 
 ### Using build.sh (recommended)
 
 ```bash
-# Build and push (default)
+# 1. Put the upstream installer URLs into setup.conf
+# 2. Log in once
+docker login
+
+# 3. Build, preinstall, and push
 ./build.sh
 
-# Build specific version
+# Optional: override the tag that is otherwise derived from the amd64 URL
 VERSION=5.0.6 ./build.sh
 
-# Build locally without pushing
+# Optional: keep the arch-specific images only in the local Docker daemon
 PUSH=false ./build.sh
 ```
 
-### Manual buildx
+`build.sh` does the full release flow automatically:
+
+1. Reads the amd64 and arm64 installer URLs from `setup.conf`
+2. Builds a base image for each platform
+3. Starts a privileged install container per architecture
+4. Waits for the UniFi installation to finish
+5. Commits the installed filesystem into final runtime images
+6. Pushes arch tags and a multi-arch manifest
+
+The upstream installer binary is used only during the build container phase and is not part of the final published image.
+
+### Base Image Only
 
 ```bash
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
-  -t giiibates/unifi-os-server:latest \
-  --push .
+  --platform linux/amd64 \
+  -t giiibates/unifi-os-server:base-test \
+  .
 ```
+
+This path builds only the installer-capable base image. It does not create the preinstalled runtime image that end users should pull.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `UOS_SYSTEM_IP` | - | System IP/hostname for device adoption |
-| `UOS_INSTALL_ON_BOOT` | `1` | Auto-install on first boot |
+| `UOS_INSTALL_ON_BOOT` | `0` in published images | Published images skip installer bootstrapping |
 | `UOS_FORCE_INSTALL` | `0` | Force reinstall |
 | `UOS_NETWORK_MODE` | `pasta` | Container network mode |
 | `UOS_WEB_PORT` | `8443` | Web interface port |

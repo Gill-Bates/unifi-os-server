@@ -18,7 +18,8 @@ services:
 
       # Hardware platform override (set to "synology" for Synology NAS)
       - HARDWARE_PLATFORM=${HARDWARE_PLATFORM:-}
-      - UOS_INSTALL_ON_BOOT=1
+      # Published images are already preinstalled during maintainer build.
+      - UOS_INSTALL_ON_BOOT=0
       - UOS_FORCE_INSTALL=0
       - UOS_NETWORK_MODE=pasta
       - UOS_WEB_PORT=8443
