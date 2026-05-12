@@ -72,6 +72,15 @@ if [ ! -d "$RABBITMQ_LOG_DIR" ]; then
     chmod 755 "$RABBITMQ_LOG_DIR"
 fi
 
+# Initialize unifi-core config dirs (required for unifi-core service to start)
+UNIFI_CORE_CONFIG_DIR="/data/unifi-core/config/http"
+if [ ! -d "$UNIFI_CORE_CONFIG_DIR" ]; then
+    mkdir -p "$UNIFI_CORE_CONFIG_DIR"
+    chown -R root:root /data/unifi-core/config
+    chmod 755 /data/unifi-core/config
+    chmod 755 "$UNIFI_CORE_CONFIG_DIR"
+fi
+
 # Apply Synology patches
 SYS_VENDOR="/sys/class/dmi/id/sys_vendor"
 if { [ -f "$SYS_VENDOR" ] && grep -q "Synology" "$SYS_VENDOR"; } \
