@@ -713,6 +713,23 @@ build_runtime_image() {
     printf '%s\n' "$final_tag"
 }
 
+tag_local_aliases() {
+    local source_tag="$1"
+
+    # Generic aliases are only unambiguous for single-platform builds.
+    if (( ${#requested_platforms[@]} != 1 )); then
+        return 0
+    fi
+
+    local version_tag="${IMAGE_NAME}:${VERSION}"
+    local latest_tag="${IMAGE_NAME}:latest"
+
+    docker tag "$source_tag" "$version_tag"
+    docker tag "$source_tag" "$latest_tag"
+
+    log "Tagged local aliases: $version_tag, $latest_tag"
+}
+
 #######################################
 # PHASE 5: VALIDATE RUNTIME IMAGE
 #######################################
@@ -979,6 +996,10 @@ build_arch_image() {
     # Phase 4: Build runtime
     final_tag=$(build_runtime_image "$arch" "$uosserver_tag") || {
         fatal "Phase 4 (build runtime) failed for ${arch}"
+    }
+
+    tag_local_aliases "$final_tag" || {
+        fatal "Failed to create local alias tags for ${arch}"
     }
 
     # Phase 5: Validate (optional)
