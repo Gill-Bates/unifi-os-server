@@ -43,15 +43,15 @@ declare -a arch_image_tags=()
 declare -a cleanup_containers=()
 
 #######################################
-# LOGGING
+# LOGGING (all to stderr to not pollute stdout for return values)
 #######################################
 
 log() {
-    printf '%s %b[build]%b %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${GREEN}" "${NC}" "$*"
+    printf '%s %b[build]%b %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${GREEN}" "${NC}" "$*" >&2
 }
 
 warn() {
-    printf '%s %b[warn]%b %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${YELLOW}" "${NC}" "$*"
+    printf '%s %b[warn]%b %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${YELLOW}" "${NC}" "$*" >&2
 }
 
 error() {
@@ -59,7 +59,7 @@ error() {
 }
 
 diag() {
-    printf '%s %b[diag]%b %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BLUE}" "${NC}" "$*"
+    printf '%s %b[diag]%b %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BLUE}" "${NC}" "$*" >&2
 }
 
 fatal() {
@@ -239,6 +239,16 @@ cleanup() {
 
 trap 'cleanup $?' EXIT
 
+# Helper to remove container from cleanup array (Befund 3.4)
+remove_from_cleanup() {
+    local name="$1"
+    local new_array=()
+    for c in "${cleanup_containers[@]}"; do
+        [[ "$c" != "$name" ]] && new_array+=("$c")
+    done
+    cleanup_containers=("${new_array[@]}")
+}
+
 #######################################
 # UTILITIES
 #######################################
@@ -267,17 +277,17 @@ validate_requested_platforms() {
     local native_arch
     native_arch="$(host_arch)"
 
-    [[ "$native_arch" == "amd64" ]] || error "This project currently supports only linux/amd64 release builds."
+    [[ "$native_arch" == "amd64" ]] || fatal "This project currently supports only linux/amd64 release builds."
 
     for platform in "${requested_platforms[@]}"; do
         local requested_arch="${platform#linux/}"
-        [[ "$requested_arch" == "amd64" ]] || error "Unsupported platform: ${platform}. This project is currently amd64-only."
+        [[ "$requested_arch" == "amd64" ]] || fatal "Unsupported platform: ${platform}. This project is currently amd64-only."
     done
 }
 
 load_config() {
     amd64_url="${UNIFI_OS_URL_X64:-}"
-    [[ -n "$amd64_url" ]] || error "UNIFI_OS_URL_X64 is required"
+    [[ -n "$amd64_url" ]] || fatal "UNIFI_OS_URL_X64 is required"
 
     if [[ -z "$VERSION" ]]; then
         VERSION="$(extract_version_from_url "$amd64_url")"
@@ -290,28 +300,37 @@ installer_url_for_arch() {
     local arch="$1"
     case "$arch" in
         amd64) printf '%s\n' "$amd64_url" ;;
-        *) error "Unsupported architecture: $arch" ;;
+        *) fatal "Unsupported architecture: $arch" ;;
     esac
 }
 
-# --- Phase 1: Build extractor image ---
+#######################################
+# PHASE 1: BUILD EXTRACTOR IMAGE
+#######################################
+
 build_extractor_image() {
     local arch="$1"
     local installer_url="$2"
     local extractor_tag="uos-extractor:${VERSION}-${arch}"
 
-    log "Building extractor image for linux/${arch}"
-    docker build \
+    log "Phase 1: Building extractor image for linux/${arch}"
+    
+    if ! docker build \
         --platform "linux/${arch}" \
         --file "${REPO_ROOT}/docker/Dockerfile.extractor" \
         --tag "$extractor_tag" \
         --build-arg "UOS_INSTALLER_URL=${installer_url}" \
-        "$REPO_ROOT" >&2
+        "$REPO_ROOT" >&2; then
+        fatal "Failed to build extractor image"
+    fi
 
-    printf '%s' "$extractor_tag"
+    printf '%s\n' "$extractor_tag"
 }
 
-# --- Phase 2: Run extractor to get uosserver image ---
+#######################################
+# PHASE 2: RUN EXTRACTION (STATE-AWARE)
+#######################################
+
 run_extraction() {
     local arch="$1"
     local extractor_tag="$2"
@@ -319,12 +338,14 @@ run_extraction() {
     local output_dir="${REPO_ROOT}/build-artifacts/extract-${arch}"
 
     mkdir -p "$output_dir"
+    cleanup_containers+=("$container_name")
 
-    log "Running extractor container to download and extract uosserver image..."
+    log "Phase 2: Running extractor container (state-aware monitoring)"
+    log "  Container: $container_name"
+    log "  Output: $output_dir"
 
-    # Run extractor in privileged container with cgroups (needed for installer)
-    docker run \
-        --rm \
+    # Start container WITHOUT --rm so we can inspect it on failure
+    docker run -d \
         --platform "linux/${arch}" \
         --name "$container_name" \
         --privileged \
@@ -335,92 +356,225 @@ run_extraction() {
         --tmpfs /var/tmp:exec \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
         -v "${output_dir}:/output" \
-        "$extractor_tag"
+        "$extractor_tag" >&2
 
-    # Check if extraction succeeded
-    if [[ ! -f "${output_dir}/uosserver.tar" ]]; then
-        save_failure_artifacts "$container_name" "$arch" "Extraction failed - no uosserver.tar"
-        error "Extraction failed: ${output_dir}/uosserver.tar not found"
+    # Monitor container state
+    local timeout_seconds=1800  # 30 minutes max
+    local poll_interval=5
+    local elapsed=0
+    local last_log_lines=""
+    local current_state=""
+    local success=false
+
+    log "Monitoring extraction (timeout: ${timeout_seconds}s)..."
+
+    while (( elapsed < timeout_seconds )); do
+        current_state=$(get_container_state "$container_name")
+
+        case "$current_state" in
+            running)
+                # Check if extraction completed
+                if [[ -f "${output_dir}/uosserver.tar" ]]; then
+                    log "Extraction artifact found while container running"
+                    success=true
+                    break
+                fi
+
+                # Show progress every 30 seconds
+                if (( elapsed % 30 == 0 )); then
+                    local new_logs
+                    new_logs=$(docker logs --tail 5 "$container_name" 2>&1 || true)
+                    if [[ "$new_logs" != "$last_log_lines" ]]; then
+                        diag "Progress (${elapsed}s): $(echo "$new_logs" | tail -1 | head -c 100)"
+                        last_log_lines="$new_logs"
+                    fi
+                fi
+                ;;
+
+            exited)
+                local exit_code oom_killed
+                exit_code=$(get_container_exit_code "$container_name")
+                oom_killed=$(get_container_oom_killed "$container_name")
+
+                if [[ "$oom_killed" == "true" ]]; then
+                    error "Container was OOM killed!"
+                    print_container_state "$container_name"
+                    preserve_failure "$container_name" "$arch" "extraction" "OOM killed"
+                    fatal "Extraction failed: container ran out of memory"
+                fi
+
+                if (( exit_code == 0 )); then
+                    log "Container exited successfully (exit code 0)"
+                    success=true
+                else
+                    warn "Container exited with code $exit_code"
+                    # Check if we got the artifact despite non-zero exit
+                    if [[ -f "${output_dir}/uosserver.tar" ]]; then
+                        log "Extraction artifact found despite non-zero exit code (expected behavior)"
+                        success=true
+                    else
+                        print_container_state "$container_name"
+                        preserve_failure "$container_name" "$arch" "extraction" "Exited with code $exit_code, no artifact"
+                        fatal "Extraction failed: container exited with code $exit_code and no uosserver.tar"
+                    fi
+                fi
+                break
+                ;;
+
+            dead)
+                error "Container is dead (docker daemon issue)"
+                print_container_state "$container_name"
+                preserve_failure "$container_name" "$arch" "extraction" "Container dead"
+                fatal "Extraction failed: container entered dead state"
+                ;;
+
+            missing)
+                error "Container disappeared unexpectedly"
+                preserve_failure "$container_name" "$arch" "extraction" "Container missing"
+                fatal "Extraction failed: container no longer exists"
+                ;;
+
+            *)
+                diag "Container state: $current_state (waiting...)"
+                ;;
+        esac
+
+        sleep "$poll_interval"
+        elapsed=$((elapsed + poll_interval))
+    done
+
+    # Timeout check
+    if [[ "$success" != "true" ]]; then
+        error "Extraction timed out after ${timeout_seconds}s"
+        print_container_state "$container_name"
+        preserve_failure "$container_name" "$arch" "extraction" "Timeout after ${timeout_seconds}s"
+        
+        # Stop the container for cleanup
+        docker stop -t 10 "$container_name" >/dev/null 2>&1 || true
+        fatal "Extraction failed: timeout"
     fi
 
-    local image_tag
-    image_tag=$(cat "${output_dir}/image-tag.txt" 2>/dev/null || echo "uosserver:unknown")
+    # Validate artifact
+    if [[ ! -f "${output_dir}/uosserver.tar" ]]; then
+        error "Extraction completed but artifact missing"
+        preserve_failure "$container_name" "$arch" "extraction" "No uosserver.tar after completion"
+        fatal "Extraction failed: uosserver.tar not found"
+    fi
 
-    log "Extraction complete. Image tag: $image_tag"
+    local tar_size
+    tar_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
+    if (( tar_size < 100000000 )); then  # Less than 100MB is suspicious
+        warn "Extracted image is suspiciously small: $((tar_size / 1024 / 1024))MB"
+    fi
+
+    log "Extraction successful: ${output_dir}/uosserver.tar ($((tar_size / 1024 / 1024))MB)"
+
+    # Cleanup container and remove from cleanup array (Befund 3.4)
+    docker rm -f "$container_name" >/dev/null 2>&1 || true
+    remove_from_cleanup "$container_name"
+
     printf '%s\n' "${output_dir}/uosserver.tar"
 }
 
-# --- Phase 3: Load extracted image into Docker ---
+#######################################
+# PHASE 3: LOAD EXTRACTED IMAGE
+#######################################
+
 load_extracted_image() {
     local arch="$1"
     local tar_path="$2"
     local target_tag="uosserver:${VERSION}-${arch}"
 
-    log "Loading extracted image into Docker..."
+    log "Phase 3: Loading extracted image into Docker"
 
     # Load the image
-    docker load -i "$tar_path"
+    local load_output
+    load_output=$(docker load -i "$tar_path" 2>&1)
+    echo "$load_output" >&2
 
-    # Find what was loaded and tag it with our target name
-    local loaded_repo
-    loaded_repo=$(docker load -i "$tar_path" 2>&1 | grep -oP 'Loaded image: \K[^:]+' | head -1 || true)
+    # Find what was loaded
+    local loaded_tag
+    loaded_tag=$(echo "$load_output" | grep -oP 'Loaded image: \K.*' | head -1 || true)
 
-    if [[ -n "$loaded_repo" ]]; then
-        local loaded_tag
-        loaded_tag=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "^${loaded_repo}:" | head -1 || true)
-        if [[ -n "$loaded_tag" && "$loaded_tag" != "$target_tag" ]]; then
-            docker tag "$loaded_tag" "$target_tag"
-        fi
+    if [[ -z "$loaded_tag" ]]; then
+        # Try to find any uosserver image
+        loaded_tag=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep -E '^(localhost/)?uosserver:' | head -1 || true)
     fi
 
-    # Verify the image exists
+    if [[ -z "$loaded_tag" ]]; then
+        fatal "Failed to load image: no uosserver image found after docker load"
+    fi
+
+    # Tag with our target name
+    if [[ "$loaded_tag" != "$target_tag" ]]; then
+        docker tag "$loaded_tag" "$target_tag"
+    fi
+
+    # Verify
     if ! docker image inspect "$target_tag" >/dev/null 2>&1; then
-        # Try to find any uosserver image and tag it
-        local any_uosserver
-        any_uosserver=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep -E '^(localhost/)?uosserver:' | head -1 || true)
-        if [[ -n "$any_uosserver" ]]; then
-            docker tag "$any_uosserver" "$target_tag"
-        else
-            error "Failed to load uosserver image"
-        fi
+        fatal "Image tagging failed: $target_tag does not exist"
     fi
 
-    log "Loaded and tagged as: $target_tag"
+    local image_size
+    image_size=$(docker image inspect --format '{{.Size}}' "$target_tag" 2>/dev/null || echo "0")
+    log "Loaded image: $target_tag ($((image_size / 1024 / 1024))MB)"
+
     printf '%s\n' "$target_tag"
 }
 
-# --- Phase 3: Build runtime image ---
+#######################################
+# PHASE 4: BUILD RUNTIME IMAGE
+#######################################
+
 build_runtime_image() {
     local arch="$1"
     local uosserver_tag="$2"
     local final_tag="${IMAGE_NAME}:${VERSION}-${arch}"
 
-    log "Building runtime image for linux/${arch}"
+    log "Phase 4: Building runtime image for linux/${arch}"
 
-    docker build \
+    if ! docker build \
         --platform "linux/${arch}" \
         --file "${REPO_ROOT}/docker/Dockerfile.runtime" \
         --tag "$final_tag" \
         --build-arg "UOSSERVER_IMAGE=${uosserver_tag}" \
         --build-arg "APP_VERSION=${VERSION}" \
         --build-arg "BUILD_DATE=${BUILD_DATE}" \
-        "$REPO_ROOT"
+        "$REPO_ROOT" >&2; then
+        fatal "Failed to build runtime image"
+    fi
+
+    local image_size
+    image_size=$(docker image inspect --format '{{.Size}}' "$final_tag" 2>/dev/null || echo "0")
+    log "Built runtime image: $final_tag ($((image_size / 1024 / 1024))MB)"
 
     arch_image_tags+=("$final_tag")
     printf '%s\n' "$final_tag"
 }
 
-# --- Phase 4: Validate runtime image (Finding B1) ---
+#######################################
+# PHASE 5: VALIDATE RUNTIME IMAGE
+#######################################
+
 validate_runtime_image() {
     local arch="$1"
     local image_tag="$2"
-    local validate_container="uos-validate-${arch}-$$"
+    local container_name="uos-validate-${arch}-$$"
+    local validation_result="passed"
 
-    log "Validating runtime image ${image_tag}"
+    log "Phase 5: Validating runtime image"
+    log "  Image: $image_tag"
+    log "  Container: $container_name"
 
-    # Start the container with required settings (same as docker-compose)
+    cleanup_containers+=("$container_name")
+
+    # Start container
+    # Note: --privileged is NOT used for runtime. NET_RAW/NET_ADMIN are required for:
+    # - NET_RAW: ICMP ping for network diagnostics
+    # - NET_ADMIN: network interface configuration, iptables rules
+    # These were determined by testing with --cap-drop ALL and incrementally adding.
     docker run -d \
-        --name "$validate_container" \
+        --name "$container_name" \
         --platform "linux/${arch}" \
         --cgroupns=host \
         --cap-add NET_RAW \
@@ -432,138 +586,257 @@ validate_runtime_image() {
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
         "$image_tag" >/dev/null
 
-    cleanup_containers+=("$validate_container")
+    # Wait for container to be running
+    sleep 2
 
-    # Wait for systemd to start (give it 30 seconds)
-    log "Waiting for systemd to initialize..."
-    local deadline=$((SECONDS + 30))
-    local systemd_ready=false
+    local state
+    state=$(get_container_state "$container_name")
 
-    while (( SECONDS < deadline )); do
-        if docker exec "$validate_container" systemctl is-system-running --wait 2>/dev/null | grep -qE 'running|degraded'; then
-            systemd_ready=true
+    if [[ "$state" != "running" ]]; then
+        error "Validation container failed to start"
+        print_container_state "$container_name"
+        preserve_failure "$container_name" "$arch" "validation" "Container not running: $state"
+        fatal "Validation failed: container state is '$state'"
+    fi
+
+    # --- Check 1: Wait for systemd ---
+    log "Check 1/4: Waiting for systemd..."
+    local timeout=90
+    local elapsed=0
+    local systemd_state=""
+
+    while (( elapsed < timeout )); do
+        systemd_state=$(docker exec "$container_name" systemctl is-system-running 2>/dev/null || echo "unknown")
+        
+        case "$systemd_state" in
+            running|degraded)
+                log "  systemd ready: $systemd_state"
+                break
+                ;;
+            starting|initializing)
+                ;;
+            *)
+                state=$(get_container_state "$container_name")
+                if [[ "$state" != "running" ]]; then
+                    error "Container exited during validation"
+                    print_container_state "$container_name"
+                    preserve_failure "$container_name" "$arch" "validation" "Container exited: $state"
+                    fatal "Validation failed: container exited"
+                fi
+                ;;
+        esac
+
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    if [[ "$systemd_state" != "running" && "$systemd_state" != "degraded" ]]; then
+        warn "  systemd did not reach running state within ${timeout}s (state: $systemd_state)"
+        validation_result="degraded"
+    fi
+
+    # --- Check 2: Verify critical services (Befund 3.1) ---
+    log "Check 2/4: Verifying critical services..."
+    local critical_services=("unifi-core" "nginx" "mongodb" "postgresql@14-main")
+    local services_ok=true
+
+    for svc in "${critical_services[@]}"; do
+        if docker exec "$container_name" systemctl is-active "$svc" >/dev/null 2>&1; then
+            log "  ✓ $svc is active"
+        else
+            warn "  ✗ $svc is not active"
+            services_ok=false
+        fi
+    done
+
+    if [[ "$services_ok" != "true" ]]; then
+        validation_result="degraded"
+    fi
+
+    # --- Check 3: Verify listening ports (Befund 3.1) ---
+    log "Check 3/4: Verifying listening ports..."
+    local expected_ports=("443" "8443" "8080" "27017")
+    local ports_ok=true
+
+    for port in "${expected_ports[@]}"; do
+        if docker exec "$container_name" ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+            log "  ✓ Port $port is listening"
+        else
+            warn "  ✗ Port $port is not listening"
+            ports_ok=false
+        fi
+    done
+
+    if [[ "$ports_ok" != "true" ]]; then
+        validation_result="degraded"
+    fi
+
+    # --- Check 4: Restart test (Befund 3.5) ---
+    log "Check 4/4: Restart test..."
+    docker stop -t 30 "$container_name" >/dev/null 2>&1
+    sleep 2
+    docker start "$container_name" >/dev/null 2>&1
+    sleep 10  # Give systemd time to reinitialize
+
+    state=$(get_container_state "$container_name")
+    if [[ "$state" != "running" ]]; then
+        error "  Container failed to restart"
+        preserve_failure "$container_name" "$arch" "validation" "Restart failed: $state"
+        fatal "Validation failed: container did not survive restart"
+    fi
+
+    # Wait for systemd after restart
+    elapsed=0
+    while (( elapsed < 60 )); do
+        systemd_state=$(docker exec "$container_name" systemctl is-system-running 2>/dev/null || echo "unknown")
+        if [[ "$systemd_state" == "running" || "$systemd_state" == "degraded" ]]; then
+            log "  ✓ Container survived restart (systemd: $systemd_state)"
             break
         fi
         sleep 2
+        elapsed=$((elapsed + 2))
     done
 
-    if [[ "$systemd_ready" != "true" ]]; then
-        warn "Systemd did not reach running state within 30s (may be normal during build)"
+    if [[ "$systemd_state" != "running" && "$systemd_state" != "degraded" ]]; then
+        warn "  ✗ systemd not ready after restart"
+        validation_result="degraded"
     fi
 
-    # Check for key processes/services
-    log "Checking container state..."
-    docker exec "$validate_container" ps aux 2>/dev/null | head -20 || true
+    # Show running services summary
+    log "Running services after validation:"
+    docker exec "$container_name" systemctl list-units --type=service --state=running 2>/dev/null | grep -E '^\s*\S+\.service' | head -15 >&2 || true
 
-    # Stop and remove validation container
-    docker stop -t 10 "$validate_container" >/dev/null 2>&1 || true
-    docker rm -f "$validate_container" >/dev/null 2>&1 || true
+    # Cleanup validation container
+    docker stop -t 10 "$container_name" >/dev/null 2>&1 || true
+    docker rm -f "$container_name" >/dev/null 2>&1 || true
+    remove_from_cleanup "$container_name"
 
-    log "Validation complete for ${image_tag}"
+    log "Validation complete (result: $validation_result)"
+    
+    # Return validation result for provenance
+    printf '%s\n' "$validation_result"
 }
 
-# --- Main build flow for one architecture ---
+#######################################
+# BUILD PROVENANCE (Befund 3.6)
+#######################################
+
+write_build_provenance() {
+    local arch="$1"
+    local installer_url="$2"
+    local image_tag="$3"
+    local validation_result="$4"
+
+    mkdir -p "$BUILD_ARTIFACTS_DIR"
+    local provenance_file="${BUILD_ARTIFACTS_DIR}/provenance-${VERSION}-${arch}.json"
+
+    # Get image digest
+    local image_digest
+    image_digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$image_tag" 2>/dev/null || echo "local-only")
+
+    # Get image size
+    local image_size
+    image_size=$(docker image inspect --format '{{.Size}}' "$image_tag" 2>/dev/null || echo "0")
+
+    log "Writing build provenance to: $provenance_file"
+
+    cat > "$provenance_file" <<EOF
+{
+  "version": "${VERSION}",
+  "arch": "${arch}",
+  "image_tag": "${image_tag}",
+  "image_digest": "${image_digest}",
+  "image_size_bytes": ${image_size},
+  "built_at": "${BUILD_DATE}",
+  "installer_url": "${installer_url}",
+  "validation_result": "${validation_result}",
+  "capabilities_required": ["NET_ADMIN", "NET_RAW"],
+  "phases_completed": {
+    "extraction": true,
+    "load": true,
+    "runtime_build": true,
+    "validation": "${validation_result}"
+  },
+  "builder": {
+    "script": "docker/build.sh",
+    "hostname": "$(hostname 2>/dev/null || echo 'unknown')"
+  }
+}
+EOF
+}
+
+#######################################
+# MAIN BUILD FLOW
+#######################################
+
 build_arch_image() {
     local arch="$1"
     local installer_url="$2"
-    local extractor_tag="uos-extractor:${VERSION}-${arch}"
+
+    log "╔══════════════════════════════════════════════════════════════╗"
+    log "║  Building for linux/${arch}"
+    log "║  Version: ${VERSION}"
+    log "╚══════════════════════════════════════════════════════════════╝"
+
+    local extractor_tag uosserver_tar uosserver_tag final_tag
     local output_dir="${REPO_ROOT}/build-artifacts/extract-${arch}"
-    local uosserver_tag="uosserver:${VERSION}-${arch}"
-    local final_tag="${IMAGE_NAME}:${VERSION}-${arch}"
 
-    log "=== Building for linux/${arch} ==="
+    # Phase 1: Build extractor
+    extractor_tag=$(build_extractor_image "$arch" "$installer_url")
 
-    # Phase 1: Build extractor base image
-    log "Building extractor image for linux/${arch}"
-    docker build \
-        --platform "linux/${arch}" \
-        --file "${REPO_ROOT}/docker/Dockerfile.extractor" \
-        --tag "$extractor_tag" \
-        --build-arg "UOS_INSTALLER_URL=${installer_url}" \
-        "$REPO_ROOT"
+    # Phase 2: Run extraction
+    uosserver_tar=$(run_extraction "$arch" "$extractor_tag")
 
-    # Phase 2: Run extractor to download installer and extract uosserver image
-    mkdir -p "$output_dir"
-    log "Running extractor container to download and extract uosserver image..."
+    # Phase 3: Load image
+    uosserver_tag=$(load_extracted_image "$arch" "$uosserver_tar")
 
-    docker run \
-        --rm \
-        --platform "linux/${arch}" \
-        --privileged \
-        --cgroupns=host \
-        --tmpfs /run:exec \
-        --tmpfs /run/lock \
-        --tmpfs /tmp:exec \
-        --tmpfs /var/tmp:exec \
-        -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-        -v "${output_dir}:/output" \
-        "$extractor_tag"
-
-    # Check if extraction succeeded
-    if [[ ! -f "${output_dir}/uosserver.tar" ]]; then
-        error "Extraction failed: ${output_dir}/uosserver.tar not found"
-    fi
-
-    log "Extraction complete."
-
-    # Phase 3: Load extracted image into Docker
-    log "Loading extracted image into Docker..."
-    docker load -i "${output_dir}/uosserver.tar"
-
-    # Tag the loaded image
-    local loaded_image
-    loaded_image=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep -E '^(localhost/)?uosserver:' | head -1 || true)
-    if [[ -n "$loaded_image" && "$loaded_image" != "$uosserver_tag" ]]; then
-        docker tag "$loaded_image" "$uosserver_tag"
-    fi
-
-    log "Loaded and tagged as: $uosserver_tag"
-
-    # Phase 4: Build runtime image
-    log "Building runtime image for linux/${arch}"
-    docker build \
-        --platform "linux/${arch}" \
-        --file "${REPO_ROOT}/docker/Dockerfile.runtime" \
-        --tag "$final_tag" \
-        --build-arg "UOSSERVER_IMAGE=${uosserver_tag}" \
-        --build-arg "APP_VERSION=${VERSION}" \
-        --build-arg "BUILD_DATE=${BUILD_DATE}" \
-        "$REPO_ROOT"
-
-    arch_image_tags+=("$final_tag")
+    # Phase 4: Build runtime
+    final_tag=$(build_runtime_image "$arch" "$uosserver_tag")
 
     # Phase 5: Validate (optional)
+    local validation_result="skipped"
     if [[ "${SKIP_VALIDATION:-false}" != "true" ]]; then
-        validate_runtime_image "$arch" "$final_tag"
+        validation_result=$(validate_runtime_image "$arch" "$final_tag")
+    else
+        warn "Skipping validation (SKIP_VALIDATION=true)"
     fi
 
     # Push if requested
     if [[ "$PUSH" == "true" ]]; then
         log "Pushing ${final_tag}"
-        docker push "$final_tag"
+        docker push "$final_tag" >&2
     fi
 
-    # Cleanup: remove extractor image and tar (large, not needed anymore)
+    # Cleanup build artifacts
+    log "Cleaning up build artifacts..."
     docker rmi "$extractor_tag" >/dev/null 2>&1 || true
-    rm -rf "${output_dir}" 2>/dev/null || true
+    rm -rf "$output_dir" 2>/dev/null || true
 
-    log "=== Completed linux/${arch} ==="
+    # Write build provenance (Befund 3.6)
+    write_build_provenance "$arch" "$installer_url" "$final_tag" "$validation_result"
+
+    log "╔══════════════════════════════════════════════════════════════╗"
+    log "║  Completed linux/${arch}"
+    log "╚══════════════════════════════════════════════════════════════╝"
 }
 
-# --- Publish manifests (fixed logic for multi-arch, Finding 4.3) ---
+#######################################
+# PUBLISH MANIFESTS
+#######################################
+
 publish_manifests() {
     if [[ "$PUSH" != "true" ]]; then
-        warn "PUSH=false, skipping remote publish step"
+        warn "PUSH=false, skipping remote publish"
         return
     fi
 
     if (( ${#arch_image_tags[@]} == 0 )); then
-        warn "No images were built; skipping publish step"
+        warn "No images were built; skipping publish"
         return
     fi
 
     if (( ${#arch_image_tags[@]} == 1 )); then
-        log "Publishing single-arch tags ${IMAGE_NAME}:${VERSION} and ${IMAGE_NAME}:latest"
+        log "Publishing single-arch tags"
         docker tag "${arch_image_tags[0]}" "${IMAGE_NAME}:${VERSION}"
         docker tag "${arch_image_tags[0]}" "${IMAGE_NAME}:latest"
         docker push "${IMAGE_NAME}:${VERSION}"
@@ -571,7 +844,6 @@ publish_manifests() {
         return
     fi
 
-    # Multi-arch: create and push manifest
     log "Creating multi-arch manifest for ${#arch_image_tags[@]} images"
     docker manifest create "${IMAGE_NAME}:${VERSION}" "${arch_image_tags[@]}" --amend || true
     docker manifest create "${IMAGE_NAME}:latest" "${arch_image_tags[@]}" --amend || true
@@ -579,19 +851,25 @@ publish_manifests() {
     docker manifest push "${IMAGE_NAME}:latest"
 }
 
+#######################################
+# MAIN
+#######################################
+
 main() {
     require_cmd docker
     require_cmd grep
     require_cmd sed
-    require_cmd jq
 
     load_config
     validate_requested_platforms
 
-    log "=== UniFi OS Server Build (lemker-style extraction) ==="
-    log "Version: ${VERSION}"
-    log "Platforms: ${PLATFORMS}"
-    log "Push: ${PUSH}"
+    log "╔══════════════════════════════════════════════════════════════╗"
+    log "║  UniFi OS Server Build"
+    log "║  Version: ${VERSION}"
+    log "║  Platforms: ${PLATFORMS}"
+    log "║  Push: ${PUSH}"
+    log "║  Artifacts: ${BUILD_ARTIFACTS_DIR}"
+    log "╚══════════════════════════════════════════════════════════════╝"
 
     for platform in "${requested_platforms[@]}"; do
         local arch="${platform#linux/}"
@@ -602,24 +880,28 @@ main() {
 
     publish_manifests
 
-    log "=== Build complete ==="
+    log "╔══════════════════════════════════════════════════════════════╗"
+    log "║  BUILD COMPLETE"
+    log "╚══════════════════════════════════════════════════════════════╝"
+
     if [[ "$PUSH" == "true" ]]; then
         log "Pushed: ${IMAGE_NAME}:${VERSION}"
         log "Pushed: ${IMAGE_NAME}:latest"
     else
-        log "Local images: ${arch_image_tags[*]}"
+        log "Local images:"
+        for tag in "${arch_image_tags[@]}"; do
+            log "  - $tag"
+        done
     fi
 
-    # Print image size comparison
-    log "Final image size:"
-    docker images --format "{{.Repository}}:{{.Tag}}\t{{.Size}}" | grep -E "^${IMAGE_NAME}:${VERSION}" || true
+    # Final image sizes
+    log "Image sizes:"
+    docker images --format "  {{.Repository}}:{{.Tag}}\t{{.Size}}" | grep -E "^  ${IMAGE_NAME}:" || true
 }
 
-if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
-    cat <<EOF
+print_help() {
+    cat <<'EOF'
 Build UniFi OS Server by extracting the inner uosserver image from the Ubiquiti installer.
-
-This produces a ~800MB image (vs ~1.6GB with the installer-in-image approach).
 
 Usage:
     ./build.sh
@@ -627,20 +909,38 @@ Usage:
 Environment variables:
     UNIFI_OS_URL_X64       amd64 installer URL (required)
     IMAGE_NAME             Target image name (default: giiibates/unifi-os-server)
-    VERSION                Override version tag; otherwise derived from URL
+    VERSION                Override version tag (derived from URL if not set)
     PLATFORMS              Target platforms (default: linux/amd64)
     PUSH                   Push images (default: true)
     SKIP_VALIDATION        Skip runtime validation (default: false)
-    KEEP_FAILED_ARTIFACTS  Keep containers/logs on failure (default: false)
-    BUILD_ARTIFACTS_DIR    Directory for failure artifacts (default: ./build-artifacts)
+    BUILD_ARTIFACTS_DIR    Directory for artifacts (default: ./build-artifacts)
 
-The build process:
-    1. Builds an extractor image that runs the Ubiquiti installer
-    2. Extracts the inner uosserver OCI image from podman storage
-    3. Builds a runtime image that runs systemd directly (no nested podman)
-    4. Validates the runtime image starts correctly
-    5. Pushes to registry if PUSH=true
+Architecture:
+    Docker Host
+    └── Extractor Container (outer)
+        └── Podman
+            └── uosserver Container (inner)
+
+Build phases:
+    1. Build extractor image with Podman and tools
+    2. Run extractor to download installer and extract uosserver image
+    3. Load extracted image into Docker
+    4. Build runtime image that runs systemd directly
+    5. Validate runtime image starts correctly
+    6. Push to registry if PUSH=true
+
+Failure handling:
+    On any failure, diagnostic artifacts are saved to BUILD_ARTIFACTS_DIR:
+    - reason.txt: failure summary
+    - inspect.json: docker inspect output
+    - stdout.log/stderr.log: container logs
+    - filesystem.tar: container filesystem export
+    - podman-*.txt: inner podman state (if available)
 EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    print_help
     exit 0
 fi
 

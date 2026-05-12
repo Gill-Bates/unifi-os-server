@@ -2,7 +2,8 @@
 # This image runs systemd directly - no nested podman.
 #
 # Build arg UOSSERVER_IMAGE must point to the extracted uosserver image tag.
-ARG UOSSERVER_IMAGE
+# The default is a placeholder - always pass --build-arg UOSSERVER_IMAGE=...
+ARG UOSSERVER_IMAGE=uosserver:latest
 
 FROM ${UOSSERVER_IMAGE}
 
