@@ -6,7 +6,15 @@
 # 2. Copy the extracted image from podman storage
 # 3. Build a runtime image that runs systemd directly (no nested podman)
 #
-# Result: ~800MB image instead of ~1.6GB (no installer binary, no podman runtime)
+# Architecture:
+#   Docker Host
+#   └── Extractor Container (outer)
+#       └── Podman
+#           └── uosserver Container (inner)
+#
+# The installer runs in the outer container, imports the uosserver image into podman,
+# then tries to start the inner container. The inner container fails (no systemd in build),
+# but the image is extracted to /output/uosserver.tar.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,11 +25,11 @@ PUSH="${PUSH:-true}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 VERSION="${VERSION:-}"
 BUILD_ARTIFACTS_DIR="${BUILD_ARTIFACTS_DIR:-${REPO_ROOT}/build-artifacts}"
-KEEP_FAILED_ARTIFACTS="${KEEP_FAILED_ARTIFACTS:-false}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
@@ -34,7 +42,10 @@ declare -a requested_platforms=()
 declare -a arch_image_tags=()
 declare -a cleanup_containers=()
 
-# --- Logging with timestamps (Finding A3) ---
+#######################################
+# LOGGING
+#######################################
+
 log() {
     printf '%s %b[build]%b %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${GREEN}" "${NC}" "$*"
 }
@@ -45,57 +56,202 @@ warn() {
 
 error() {
     printf '%s %b[error]%b %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${RED}" "${NC}" "$*" >&2
+}
+
+diag() {
+    printf '%s %b[diag]%b %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BLUE}" "${NC}" "$*"
+}
+
+fatal() {
+    error "$@"
     exit 1
 }
 
-# --- Failure handling: preserve artifacts (Finding A1) ---
-save_failure_artifacts() {
+#######################################
+# CONTAINER STATE MODEL
+#######################################
+
+# Container states we care about:
+#   running   - container is running
+#   exited    - container exited (check exit code)
+#   dead      - container is dead (docker daemon issue)
+#   removing  - container is being removed
+#   paused    - container is paused
+#   created   - container created but not started
+#   restarting - container is restarting
+#   <missing> - container does not exist
+
+get_container_state() {
+    local container_name="$1"
+    local state
+    state=$(docker inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null) || {
+        printf 'missing\n'
+        return
+    }
+    printf '%s\n' "$state"
+}
+
+get_container_exit_code() {
+    local container_name="$1"
+    docker inspect --format '{{.State.ExitCode}}' "$container_name" 2>/dev/null || printf '255\n'
+}
+
+get_container_oom_killed() {
+    local container_name="$1"
+    docker inspect --format '{{.State.OOMKilled}}' "$container_name" 2>/dev/null || printf 'false\n'
+}
+
+get_container_error() {
+    local container_name="$1"
+    docker inspect --format '{{.State.Error}}' "$container_name" 2>/dev/null || printf '\n'
+}
+
+get_container_started_at() {
+    local container_name="$1"
+    docker inspect --format '{{.State.StartedAt}}' "$container_name" 2>/dev/null || printf '\n'
+}
+
+get_container_finished_at() {
+    local container_name="$1"
+    docker inspect --format '{{.State.FinishedAt}}' "$container_name" 2>/dev/null || printf '\n'
+}
+
+container_exists() {
+    local container_name="$1"
+    docker inspect "$container_name" >/dev/null 2>&1
+}
+
+# Print full container state for diagnostics
+print_container_state() {
+    local container_name="$1"
+    local prefix="${2:-}"
+
+    if ! container_exists "$container_name"; then
+        diag "${prefix}Container '$container_name': does not exist"
+        return 1
+    fi
+
+    local state exit_code oom_killed error_msg started finished
+    state=$(get_container_state "$container_name")
+    exit_code=$(get_container_exit_code "$container_name")
+    oom_killed=$(get_container_oom_killed "$container_name")
+    error_msg=$(get_container_error "$container_name")
+    started=$(get_container_started_at "$container_name")
+    finished=$(get_container_finished_at "$container_name")
+
+    diag "${prefix}Container '$container_name':"
+    diag "${prefix}  state:      $state"
+    diag "${prefix}  exit_code:  $exit_code"
+    diag "${prefix}  oom_killed: $oom_killed"
+    diag "${prefix}  started:    $started"
+    diag "${prefix}  finished:   $finished"
+    [[ -z "$error_msg" ]] || diag "${prefix}  error:      $error_msg"
+}
+
+#######################################
+# FAILURE PRESERVATION
+#######################################
+
+# Always preserve failure artifacts - this is critical for debugging
+preserve_failure() {
     local container_name="$1"
     local arch="$2"
-    local reason="$3"
+    local phase="$3"
+    local reason="$4"
 
-    if [[ "$KEEP_FAILED_ARTIFACTS" != "true" ]]; then
+    mkdir -p "$BUILD_ARTIFACTS_DIR"
+    local timestamp
+    timestamp=$(date -u +%Y%m%d-%H%M%S)
+    local prefix="${BUILD_ARTIFACTS_DIR}/failure-${arch}-${phase}-${timestamp}"
+
+    warn "=== FAILURE PRESERVATION ==="
+    warn "Phase: $phase"
+    warn "Reason: $reason"
+    warn "Artifacts: ${prefix}*"
+
+    # Save reason
+    {
+        echo "Phase: $phase"
+        echo "Reason: $reason"
+        echo "Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "Container: $container_name"
+        echo "Architecture: $arch"
+        echo "Version: ${VERSION:-unknown}"
+    } > "${prefix}-reason.txt"
+
+    # Check if container still exists
+    if ! container_exists "$container_name"; then
+        warn "Container '$container_name' no longer exists - limited diagnostics available"
+        echo "Container did not exist at time of failure preservation" >> "${prefix}-reason.txt"
         return
     fi
 
-    mkdir -p "$BUILD_ARTIFACTS_DIR"
-    local prefix="${BUILD_ARTIFACTS_DIR}/failed-${arch}-${VERSION:-unknown}"
+    # Save container state
+    print_container_state "$container_name" "  " >> "${prefix}-reason.txt"
 
-    warn "Saving failure artifacts to ${prefix}*"
-    docker logs "$container_name" > "${prefix}-logs.txt" 2>&1 || true
+    # Save full inspect
+    diag "Saving docker inspect..."
     docker inspect "$container_name" > "${prefix}-inspect.json" 2>&1 || true
-    docker export "$container_name" > "${prefix}-filesystem.tar" 2>&1 || true
-    echo "$reason" > "${prefix}-reason.txt"
+
+    # Save logs (full, not truncated)
+    diag "Saving container logs..."
+    docker logs "$container_name" > "${prefix}-stdout.log" 2> "${prefix}-stderr.log" || true
+
+    # Save filesystem if container exists
+    local state
+    state=$(get_container_state "$container_name")
+    if [[ "$state" == "exited" || "$state" == "dead" || "$state" == "running" ]]; then
+        diag "Exporting container filesystem (may take a moment)..."
+        docker export "$container_name" > "${prefix}-filesystem.tar" 2>/dev/null || true
+    fi
+
+    # Try to get inner podman state if possible
+    if [[ "$state" == "running" ]]; then
+        diag "Capturing inner podman state..."
+        docker exec "$container_name" podman ps -a > "${prefix}-podman-ps.txt" 2>&1 || true
+        docker exec "$container_name" podman images > "${prefix}-podman-images.txt" 2>&1 || true
+        docker exec "$container_name" podman logs uosserver > "${prefix}-podman-uosserver.log" 2>&1 || true
+    fi
+
+    warn "Failure artifacts saved to: ${prefix}*"
 }
 
-cleanup() {
-    local exit_code="$1"
-    trap - EXIT
+#######################################
+# CLEANUP
+#######################################
 
-    for container_name in "${cleanup_containers[@]}"; do
-        [[ -n "$container_name" ]] || continue
-        if [[ "$exit_code" -ne 0 && "$KEEP_FAILED_ARTIFACTS" == "true" ]]; then
-            warn "Keeping failed container $container_name for debugging"
-        else
-            docker rm -f "$container_name" >/dev/null 2>&1 || true
-        fi
-    done
+cleanup() {
+    local exit_code="${1:-$?}"
+    trap - EXIT ERR
+
+    if (( ${#cleanup_containers[@]} > 0 )); then
+        log "Cleaning up ${#cleanup_containers[@]} container(s)..."
+        for container_name in "${cleanup_containers[@]}"; do
+            [[ -n "$container_name" ]] || continue
+            if container_exists "$container_name"; then
+                docker rm -f "$container_name" >/dev/null 2>&1 || true
+            fi
+        done
+    fi
 
     exit "$exit_code"
 }
 
 trap 'cleanup $?' EXIT
 
+#######################################
+# UTILITIES
+#######################################
+
 require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || error "Missing required command: $1"
+    command -v "$1" >/dev/null 2>&1 || fatal "Missing required command: $1"
 }
 
 extract_version_from_url() {
     local url="$1"
     local version
-
     version="$(sed -E 's|.*-([0-9]+\.[0-9]+\.[0-9]+)-.*|\1|' <<<"$url")"
-    [[ -n "$version" && "$version" != "$url" ]] || error "Could not derive version from URL: $url"
+    [[ -n "$version" && "$version" != "$url" ]] || fatal "Could not derive version from URL: $url"
     printf '%s\n' "$version"
 }
 

@@ -65,4 +65,4 @@ jobs:
           PLATFORMS: linux/amd64
           UNIFI_OS_URL_X64: ${{ vars.UNIFI_OS_URL_X64 }}
           UNIFI_OS_URL_ARM64: ${{ vars.UNIFI_OS_URL_ARM64 }}
-        run: bash ./build.sh
+        run: bash ./docker/build.sh
