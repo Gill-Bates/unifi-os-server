@@ -6,8 +6,8 @@ FROM debian:trixie-slim
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-ARG APP_VERSION=""
-ARG BUILD_DATE=""
+ARG APP_VERSION="dev"
+ARG BUILD_DATE="unknown"
 # Architecture-specific installer URLs from Ubiquiti
 ARG UOS_INSTALLER_URL_AMD64="https://fw-download.ubnt.com/data/unifi-os-server/1856-linux-x64-5.0.6-33f4990f-6c68-4e72-9d9c-477496c22450.6-x64"
 ARG UOS_INSTALLER_URL_ARM64="https://fw-download.ubnt.com/data/unifi-os-server/df5b-linux-arm64-5.0.6-f35e944c-f4b6-4190-93a8-be61b96c58f4.6-arm64"

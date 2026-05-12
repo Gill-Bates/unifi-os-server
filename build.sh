@@ -18,6 +18,11 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    printf '[build] This script must be executed, not sourced. Use ./build.sh or bash ./build.sh.\n' >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 amd64_url=""
 arm64_url=""
 declare -a requested_platforms=()
