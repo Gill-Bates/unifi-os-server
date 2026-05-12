@@ -278,22 +278,35 @@ host_arch() {
 # URL CONFIGURATION
 #######################################
 
-# URLs must be provided via environment variables or setup.conf
-# The check-updates workflow automatically updates setup.conf with latest URLs
+DOWNLOAD_API_URL="https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server"
 
-load_config() {
-    # Try to load from setup.conf if it exists and URLs not set
-    if [[ -z "${UNIFI_OS_URL_X64:-}" && -f "${REPO_ROOT}/setup.conf" ]]; then
-        log "Loading URLs from setup.conf..."
-        # shellcheck disable=SC1091
-        source "${REPO_ROOT}/setup.conf" 2>/dev/null || true
+fetch_urls_from_api() {
+    log "Fetching latest URLs from Ubiquiti API..."
+    local response
+    response=$(curl -sL "$DOWNLOAD_API_URL" 2>/dev/null) || {
+        error "Failed to fetch from API"
+        return 1
+    }
+    
+    amd64_url=$(echo "$response" | jq -r '[.downloads[] | select(.name | test("Linux.*x64"; "i"))] | sort_by(.version) | reverse | .[0].file_url // empty')
+    arm64_url=$(echo "$response" | jq -r '[.downloads[] | select(.name | test("Linux.*arm64"; "i"))] | sort_by(.version) | reverse | .[0].file_url // empty')
+    
+    if [[ -z "$amd64_url" ]]; then
+        error "Could not find x64 download URL in API response"
+        return 1
     fi
     
+    log "Found x64 URL: $amd64_url"
+    log "Found arm64 URL: $arm64_url"
+}
+
+load_config() {
+    # Use environment variables if set, otherwise fetch from API
     amd64_url="${UNIFI_OS_URL_X64:-}"
     arm64_url="${UNIFI_OS_URL_ARM64:-}"
     
     if [[ -z "$amd64_url" ]]; then
-        fatal "UNIFI_OS_URL_X64 is required. Set it via environment variable or in setup.conf"
+        fetch_urls_from_api || fatal "Failed to fetch URLs from API"
     fi
 
     if [[ -z "$VERSION" ]]; then
