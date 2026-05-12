@@ -284,6 +284,30 @@ host_arch() {
     esac
 }
 
+# Check if QEMU/binfmt is available for cross-architecture builds
+can_emulate_arch() {
+    local target_arch="$1"
+    local host="$(host_arch)"
+    
+    # Native architecture always works
+    [[ "$target_arch" == "$host" ]] && return 0
+    
+    # Check binfmt_misc for the target architecture
+    local binfmt_path="/proc/sys/fs/binfmt_misc"
+    if [[ -d "$binfmt_path" ]]; then
+        case "$target_arch" in
+            arm64|aarch64)
+                [[ -f "$binfmt_path/qemu-aarch64" ]] && return 0
+                ;;
+            amd64|x86_64)
+                [[ -f "$binfmt_path/qemu-x86_64" ]] && return 0
+                ;;
+        esac
+    fi
+    
+    return 1
+}
+
 #######################################
 # URL CONFIGURATION
 #######################################
@@ -328,6 +352,7 @@ load_config() {
 }
 
 validate_requested_platforms() {
+    local host="$(host_arch)"
     for platform in "${requested_platforms[@]}"; do
         local requested_arch="${platform#linux/}"
         case "$requested_arch" in
@@ -341,6 +366,15 @@ validate_requested_platforms() {
                 fatal "Unsupported platform: ${platform}. Supported: linux/amd64, linux/arm64"
                 ;;
         esac
+        
+        # Check cross-architecture emulation
+        if [[ "$requested_arch" != "$host" ]]; then
+            if ! can_emulate_arch "$requested_arch"; then
+                fatal "Cannot build for $requested_arch on $host host - QEMU not available.
+Install QEMU with: docker run --privileged --rm tonistiigi/binfmt --install all"
+            fi
+            warn "Cross-architecture build: $requested_arch on $host (using QEMU emulation)"
+        fi
     done
 }
 
