@@ -66,8 +66,8 @@ RUN mkdir -p \
 	&& chown -R "${UOS_UID}:${UOS_UID}" /home/uosserver
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY --chmod=755 build/loginctl-stub.sh /usr/local/bin/loginctl
-COPY --chmod=755 build/systemctl-stub.sh /usr/local/bin/systemctl
+COPY --chmod=755 docker/loginctl-stub.sh /usr/local/bin/loginctl
+COPY --chmod=755 docker/systemctl-stub.sh /usr/local/bin/systemctl
 
 RUN mv /usr/bin/loginctl /usr/bin/loginctl.real 2>/dev/null || true \
 	&& ln -sf /usr/local/bin/loginctl /usr/bin/loginctl \

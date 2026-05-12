@@ -25,7 +25,7 @@ The published image is currently amd64-only.
 
 ## Building Release Images
 
-### Using build.sh (recommended)
+### Using docker/build.sh (recommended)
 
 ```bash
 # 1. Put the upstream amd64 installer URL into setup.conf
@@ -33,19 +33,19 @@ The published image is currently amd64-only.
 docker login
 
 # 3. Build, preinstall, and push for the native host architecture
-./build.sh
+./docker/build.sh
 
 # Optional: override the tag that is otherwise derived from the amd64 URL
-VERSION=5.0.6 ./build.sh
+VERSION=5.0.6 ./docker/build.sh
 
 # Optional: keep the arch-specific image only in the local Docker daemon
-PUSH=false ./build.sh
+PUSH=false ./docker/build.sh
 
 # Optional: override the platform explicitly
-PLATFORMS=linux/amd64 ./build.sh
+PLATFORMS=linux/amd64 ./docker/build.sh
 ```
 
-`build.sh` does the full release flow automatically:
+`docker/build.sh` does the full release flow automatically:
 
 1. Reads the amd64 installer URL from `setup.conf`
 2. Builds a base image for the requested native platform
@@ -63,6 +63,7 @@ Important: the active release path is currently amd64-only. Run the build on an 
 ```bash
 docker buildx build \
   --platform linux/amd64 \
+  -f docker/Dockerfile \
   -t giiibates/unifi-os-server:base-test \
   .
 ```

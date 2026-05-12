@@ -4,12 +4,13 @@
 # Keep the Docker build context minimal so installer binaries and runtime state
 # never end up in the local build cache.
 *
-!Dockerfile
+!docker/Dockerfile
+!docker/build.sh
 !docker/entrypoint.sh
-!build/loginctl-stub.sh
-!build/systemctl-stub.sh
+!docker/loginctl-stub.sh
+!docker/systemctl-stub.sh
 !README.md
 !setup.conf
 !docker-compose.yml
 !.dockerignore
-!unifi.conf
+!unifi-os-server.conf

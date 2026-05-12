@@ -20,7 +20,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
-    printf '[build] This script must be executed, not sourced. Use ./build.sh or bash ./build.sh.\n' >&2
+    printf '[build] This script must be executed, not sourced. Use ./docker/build.sh or bash ./docker/build.sh.\n' >&2
     return 1 2>/dev/null || exit 1
 fi
 
@@ -157,6 +157,7 @@ build_base_image() {
     docker buildx build \
         --builder "$BUILDER_NAME" \
         --platform "linux/${arch}" \
+        --file "${REPO_ROOT}/docker/Dockerfile" \
         --load \
         --tag "$base_tag" \
         --build-arg "APP_VERSION=${VERSION}" \
@@ -300,14 +301,14 @@ if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
 Builds a fully installed UniFi OS Server image from the URLs in setup.conf.
 
 Usage:
-    ./build.sh
+    ./docker/build.sh
 
 Environment variables:
   IMAGE_NAME             Target image name (default: giiibates/unifi-os-server)
   VERSION                Override version tag; otherwise derived from amd64 URL
-    PLATFORMS              Comma-separated target platforms (default: linux/amd64)
-    PUSH                   Push image tags (default: true)
-    SETUP_FILE             Path to URL config (default: <repo-root>/setup.conf)
+  PLATFORMS              Comma-separated target platforms (default: linux/amd64)
+  PUSH                   Push image tags (default: true)
+  SETUP_FILE             Path to URL config (default: <repo-root>/setup.conf)
   WAIT_TIMEOUT_SECONDS   Installer timeout per arch (default: 1800)
 
 The script builds a base image, runs the installer in a privileged container,

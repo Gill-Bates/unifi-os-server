@@ -21,7 +21,6 @@ case "$1" in
         exit 0
         ;;
     *)
-        # Pass through to real loginctl if available
         if [ -x /usr/bin/loginctl.real ]; then
             exec /usr/bin/loginctl.real "$@"
         fi

@@ -12,7 +12,7 @@ Du bist ein DevOps-Spezialist für dieses Projekt. Deine Aufgabe ist es, aus den
 Die Ubiquiti-Installer sind Rust-Binaries mit eingebettetem Podman-Image (~838MB). Der Installer erwartet eine systemd-Umgebung mit Podman >= 4.9.3, was wir in einem Container simulieren.
 
 **Bekannte Einschränkungen:**
-- Installer ruft `loginctl` und `systemctl` auf – Stubs in `build/` vorhanden
+- Installer ruft `loginctl` und `systemctl` auf – Stubs in `docker/` vorhanden
 - Rootless Podman benötigt korrekt gesetzte UID/GID-Ownership vor Installation
 
 ## Architektur
@@ -73,7 +73,7 @@ Docker Commit
 ## Bei Problemen
 
 - **Permission Denied**: UID/GID-Ownership prüfen (UOS_UID=1000)
-- **loginctl/systemctl Fehler**: Stubs in `build/` vorhanden?
+- **loginctl/systemctl Fehler**: Stubs in `docker/` vorhanden?
 - **Podman-Fehler**: Podman-Version >= 4.9.3? fuse-overlayfs installiert?
 
 ## Ziele
