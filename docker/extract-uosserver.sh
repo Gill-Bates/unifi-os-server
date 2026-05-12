@@ -182,6 +182,67 @@ if (( TAR_SIZE_MB < 500 )); then
     error "Image export failed - incomplete image"
 fi
 
+# Verify docker-archive format has required files for 'docker load'
+# Docker requires either 'manifest.json' (newer) or 'repositories' (legacy)
+log "Verifying tar archive format..."
+if ! tar -tf "$OUTPUT_TAR" | grep -qE '^(manifest\.json|repositories)$'; then
+    log "WARNING: Archive missing manifest.json/repositories - adding compatibility layer"
+    
+    # Extract to temp dir, add repositories file, repack
+    TEMP_EXTRACT=$(mktemp -d)
+    tar -xf "$OUTPUT_TAR" -C "$TEMP_EXTRACT"
+    
+    # Check what we have
+    log "Archive contents:"
+    ls -la "$TEMP_EXTRACT"
+    
+    # If we have manifest.json but no repositories, create repositories from manifest
+    if [[ -f "$TEMP_EXTRACT/manifest.json" ]] && [[ ! -f "$TEMP_EXTRACT/repositories" ]]; then
+        log "Creating repositories file from manifest.json"
+        # Extract repo:tag and layer info from manifest
+        REPO_TAG=$(jq -r '.[0].RepoTags[0] // empty' "$TEMP_EXTRACT/manifest.json" 2>/dev/null || true)
+        if [[ -n "$REPO_TAG" ]]; then
+            REPO_NAME="${REPO_TAG%%:*}"
+            TAG_NAME="${REPO_TAG##*:}"
+            # Get the config digest (last layer is usually the config reference)
+            CONFIG_FILE=$(jq -r '.[0].Config // empty' "$TEMP_EXTRACT/manifest.json" 2>/dev/null || true)
+            if [[ -n "$CONFIG_FILE" ]]; then
+                # repositories format: {"repo":{"tag":"layer-id"}}
+                LAYER_ID="${CONFIG_FILE%.json}"
+                LAYER_ID="${LAYER_ID#sha256:}"
+                echo "{\"$REPO_NAME\":{\"$TAG_NAME\":\"$LAYER_ID\"}}" > "$TEMP_EXTRACT/repositories"
+                log "Created repositories: {\"$REPO_NAME\":{\"$TAG_NAME\":\"...\"}}"
+            fi
+        fi
+    fi
+    
+    # If still no repositories and no manifest, this is OCI format - need skopeo
+    if [[ ! -f "$TEMP_EXTRACT/manifest.json" ]] && [[ ! -f "$TEMP_EXTRACT/repositories" ]]; then
+        log "Archive appears to be OCI format, not docker-archive"
+        if command -v skopeo &>/dev/null; then
+            log "Using skopeo to convert OCI to docker-archive..."
+            rm -f "$OUTPUT_TAR"
+            skopeo copy "oci-archive:$OUTPUT_TAR.oci" "docker-archive:$OUTPUT_TAR:$IMAGE_NAME" 2>/dev/null || true
+        else
+            log "skopeo not available, attempting direct layer extraction..."
+        fi
+    fi
+    
+    # Repack if we modified anything
+    if [[ -f "$TEMP_EXTRACT/repositories" ]] || [[ -f "$TEMP_EXTRACT/manifest.json" ]]; then
+        log "Repacking archive..."
+        rm -f "$OUTPUT_TAR"
+        tar -cf "$OUTPUT_TAR" -C "$TEMP_EXTRACT" .
+        log "Repacked tar size: $(stat -c%s "$OUTPUT_TAR" 2>/dev/null | awk '{printf "%.0fMB", $1/1024/1024}')"
+    fi
+    
+    rm -rf "$TEMP_EXTRACT"
+fi
+
+# Final verification
+log "Final archive check:"
+tar -tf "$OUTPUT_TAR" | head -10
+
 # Also save the image tag for the build script
 echo "$IMAGE_NAME" > "${OUTPUT_DIR}/image-tag.txt"
 
