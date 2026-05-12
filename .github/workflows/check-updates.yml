@@ -18,6 +18,7 @@ on:
 env:
   # Ubiquiti Download API - no browser needed!
   DOWNLOAD_API_URL: "https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # Prevent multiple concurrent runs - only one update check at a time
 concurrency:

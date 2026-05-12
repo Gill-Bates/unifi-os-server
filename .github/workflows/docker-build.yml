@@ -24,6 +24,7 @@ on:
 env:
   REGISTRY: docker.io
   IMAGE_NAME: giiibates/unifi-os-server
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # Prevent duplicate builds - queue new runs, don't cancel in-progress builds
 concurrency:
