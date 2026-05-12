@@ -163,7 +163,7 @@ jobs:
               ref: 'main',
               inputs: {
                 push: 'true',
-                platforms: 'linux/amd64,linux/arm64'
+                platforms: 'linux/amd64'  // arm64 requires paid GitHub runners
               }
             });
             console.log('Triggered build workflow');

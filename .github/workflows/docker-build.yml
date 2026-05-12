@@ -14,7 +14,7 @@ on:
       platforms:
         description: 'Platforms to build'
         required: false
-        default: 'linux/amd64,linux/arm64'
+        default: 'linux/amd64'  # arm64 requires paid GitHub runners
         type: choice
         options:
           - 'linux/amd64'
