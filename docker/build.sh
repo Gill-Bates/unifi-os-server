@@ -275,41 +275,35 @@ host_arch() {
 }
 
 #######################################
-# AUTO-FETCH URLS FROM UI.COM
+# URL CONFIGURATION
 #######################################
 
-fetch_latest_urls() {
-    log "Fetching latest UniFi OS Server URLs from ui.com..."
-    
-    local page_content
-    page_content=$(curl -sL -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0" \
-        "https://ui.com/download/software/unifi-os-server" 2>/dev/null || echo "")
-    
-    if [[ -z "$page_content" ]]; then
-        fatal "Failed to fetch download page from ui.com"
+# URLs must be provided via environment variables or setup.conf
+# The check-updates workflow automatically updates setup.conf with latest URLs
+
+load_config() {
+    # Try to load from setup.conf if it exists and URLs not set
+    if [[ -z "${UNIFI_OS_URL_X64:-}" && -f "${REPO_ROOT}/setup.conf" ]]; then
+        log "Loading URLs from setup.conf..."
+        # shellcheck disable=SC1091
+        source "${REPO_ROOT}/setup.conf" 2>/dev/null || true
     fi
     
-    # Extract Linux x64 URL
-    local url_x64
-    url_x64=$(echo "$page_content" | grep -oP 'https://fw-download\.ubnt\.com/data/unifi-os-server/[a-z0-9]+-linux-x64-[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9-]+\.[0-9]+-x64' | head -1 || echo "")
+    amd64_url="${UNIFI_OS_URL_X64:-}"
+    arm64_url="${UNIFI_OS_URL_ARM64:-}"
     
-    # Extract Linux arm64 URL
-    local url_arm64
-    url_arm64=$(echo "$page_content" | grep -oP 'https://fw-download\.ubnt\.com/data/unifi-os-server/[a-z0-9]+-linux-arm64-[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9-]+\.[0-9]+-arm64' | head -1 || echo "")
-    
-    if [[ -z "$url_x64" ]]; then
-        fatal "Could not extract x64 URL from ui.com download page"
+    if [[ -z "$amd64_url" ]]; then
+        fatal "UNIFI_OS_URL_X64 is required. Set it via environment variable or in setup.conf"
     fi
-    
-    log "Found x64 URL: $url_x64"
-    if [[ -n "$url_arm64" ]]; then
-        log "Found arm64 URL: $url_arm64"
-    else
-        warn "arm64 URL not found on download page"
+
+    if [[ -z "$VERSION" ]]; then
+        VERSION="$(extract_version_from_url "$amd64_url")"
     fi
+
+    IFS=',' read -r -a requested_platforms <<<"$PLATFORMS"
     
-    amd64_url="$url_x64"
-    arm64_url="$url_arm64"
+    log "Version: $VERSION"
+    log "Platforms: ${requested_platforms[*]}"
 }
 
 validate_requested_platforms() {
@@ -320,36 +314,13 @@ validate_requested_platforms() {
                 [[ -n "$amd64_url" ]] || fatal "amd64 URL not available"
                 ;;
             arm64)
-                [[ -n "$arm64_url" ]] || fatal "arm64 URL not available (set UNIFI_OS_URL_ARM64 or check ui.com)"
+                [[ -n "$arm64_url" ]] || fatal "arm64 URL not available - set UNIFI_OS_URL_ARM64"
                 ;;
             *)
                 fatal "Unsupported platform: ${platform}. Supported: linux/amd64, linux/arm64"
                 ;;
         esac
     done
-}
-
-load_config() {
-    amd64_url="${UNIFI_OS_URL_X64:-}"
-    arm64_url="${UNIFI_OS_URL_ARM64:-}"
-    
-    # Auto-fetch URLs if not provided
-    if [[ -z "$amd64_url" && -z "$arm64_url" ]]; then
-        fetch_latest_urls
-    elif [[ -z "$amd64_url" ]]; then
-        # Only arm64 provided, fetch x64 for version extraction
-        fetch_latest_urls
-        # But use provided arm64 URL if explicitly set
-        [[ -n "${UNIFI_OS_URL_ARM64:-}" ]] && arm64_url="${UNIFI_OS_URL_ARM64}"
-    fi
-    
-    [[ -n "$amd64_url" ]] || fatal "Could not determine x64 URL"
-
-    if [[ -z "$VERSION" ]]; then
-        VERSION="$(extract_version_from_url "$amd64_url")"
-    fi
-
-    IFS=',' read -r -a requested_platforms <<<"$PLATFORMS"
 }
 
 installer_url_for_arch() {
