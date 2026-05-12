@@ -1,11 +1,10 @@
 # Trixie is intentional here: the upstream installer expects Podman >= 4.9.3,
 # while Debian bookworm currently ships only 4.3.1.
-FROM debian:trixie-slim@sha256:109e2c65005bf160609e4ba6acf7783752f8502ad218e298253428690b9eaa4b
+FROM debian:trixie-slim
 
 ARG APP_VERSION=""
 ARG BUILD_DATE=""
 ARG UOS_INSTALLER_URL="https://fw-download.ubnt.com/data/unifi-os-server/1856-linux-x64-5.0.6-33f4990f-6c68-4e72-9d9c-477496c22450.6-x64"
-ARG UOS_INSTALLER_FILE="1856-linux-x64-5.0.6-33f4990f-6c68-4e72-9d9c-477496c22450.6-x64"
 ARG UOS_INSTALLER_CHECKSUM=""
 ARG UOS_UID="1000"
 
@@ -55,12 +54,6 @@ RUN mkdir -p \
 		/var/log/uosserver \
 		/home/uosserver/.config/containers \
 		/home/uosserver/.local/share/containers/storage
-
-COPY ${UOS_INSTALLER_FILE} ${UOS_INSTALLER_PATH}
-
-RUN test -s "$UOS_INSTALLER_PATH" \
-	&& if [ -n "$UOS_INSTALLER_CHECKSUM" ]; then echo "$UOS_INSTALLER_CHECKSUM  $UOS_INSTALLER_PATH" | sha256sum -c -; fi \
-	&& chmod 755 "$UOS_INSTALLER_PATH"
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 

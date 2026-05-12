@@ -2,7 +2,7 @@
 
 services:
   unifi-os-server:
-    image: ${UOS_IMAGE:-docker.cirrio.de/unifi-os-server:latest}
+    image: giiibates/unifi-os-server:latest
     container_name: unifi-os-server
     hostname: unifi-os-server
     privileged: true
