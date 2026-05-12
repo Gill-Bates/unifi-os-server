@@ -5,8 +5,12 @@
 # never end up in the local build cache.
 *
 !docker/Dockerfile
+!docker/Dockerfile.extractor
+!docker/Dockerfile.runtime
 !docker/build.sh
 !docker/entrypoint.sh
+!docker/uos-entrypoint.sh
+!docker/extract-uosserver.sh
 !docker/loginctl-stub.sh
 !docker/systemctl-stub.sh
 !README.md

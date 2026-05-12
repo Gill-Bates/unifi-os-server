@@ -1,0 +1,76 @@
+---
+# UniFi OS Server - Docker Compose
+# Based on the extracted uosserver image, running systemd directly.
+#
+# Requires:
+#   - Docker with cgroup v2 support
+#   - Host kernel with macvlan module (optional, for eth0 alias)
+#
+# Usage:
+#   docker compose up -d
+#
+services:
+  unifi-os-server:
+    image: giiibates/unifi-os-server:latest
+    container_name: unifi-os-server
+    # cgroup: host is required for systemd
+    cgroup: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    tmpfs:
+      - /run:exec
+      - /run/lock
+      - /tmp:exec
+      - /var/lib/journal
+      - /var/opt/unifi/tmp:size=64m
+    environment:
+      # Hostname or IP for device adoption (required for remote management)
+      - UOS_SYSTEM_IP=unifi.example.com
+      # Optional: Set to 'synology' if running on Synology NAS
+      # - HARDWARE_PLATFORM=synology
+    volumes:
+      # Required: cgroup mount for systemd
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Persistent data volumes
+      - ./data/persistent:/persistent
+      - ./data/var-log:/var/log
+      - ./data/data:/data
+      - ./data/srv:/srv
+      - ./data/var-lib-unifi:/var/lib/unifi
+      - ./data/var-lib-mongodb:/var/lib/mongodb
+      - ./data/etc-rabbitmq-ssl:/etc/rabbitmq/ssl
+    ports:
+      # UniFi OS Server GUI/API
+      - "11443:443"
+      # RTP (Real-time Transport Protocol) - Optional
+      - "5005:5005"
+      # UniFi Identity Hub - Optional
+      - "9543:9543"
+      # UniFi mobile speed test - Optional
+      - "6789:6789"
+      # Device and application communication (required)
+      - "8080:8080"
+      # UniFi Network Application GUI/API - Optional
+      - "8443:8443"
+      # Secure Portal for Hotspot - Optional
+      - "8444:8444"
+      # STUN for device adoption (required)
+      - "3478:3478/udp"
+      # Remote syslog capture - Optional
+      - "5514:5514/udp"
+      # Device discovery during adoption (required)
+      - "10003:10003/udp"
+      # UniFi Site Supervisor - Optional
+      - "11084:11084"
+      # AQMPS - Optional
+      - "5671:5671"
+      # Hotspot portal redirection - Optional
+      - "8880:8880"
+      - "8881:8881"
+      - "8882:8882"
+    restart: unless-stopped
+    # systemd needs SIGRTMIN+3 for clean shutdown
+    stop_signal: SIGRTMIN+3

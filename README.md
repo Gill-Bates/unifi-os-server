@@ -3,17 +3,37 @@
 [![Docker Build](https://github.com/giiibates/unifi-os-server/actions/workflows/docker-build.yml/badge.svg)](https://github.com/giiibates/unifi-os-server/actions/workflows/docker-build.yml)
 [![Docker Pulls](https://img.shields.io/docker/pulls/giiibates/unifi-os-server)](https://hub.docker.com/r/giiibates/unifi-os-server)
 
-Run UniFi OS Server in Docker with amd64 support.
-The published image is preinstalled during the maintainer build and does not download the upstream installer on first boot.
+Run [UniFi OS Server](https://blog.ui.com/article/introducing-unifi-os-server) directly in Docker.
+
+This project extracts the inner `uosserver` image from the official Ubiquiti installer and runs systemd directly - no nested Podman containers.
 
 ## Quick Start
 
 ```bash
 docker pull giiibates/unifi-os-server:latest
-docker compose -f docker/docker-compose.yml up -d
+
+# Create data directories
+mkdir -p data/{persistent,var-log,data,srv,var-lib-unifi,var-lib-mongodb,etc-rabbitmq-ssl}
+
+# Start with docker compose
+docker compose up -d
 ```
 
-The runtime compose file lives in [docker/docker-compose.yml](/opt/unifi-os-server/docker/docker-compose.yml).
+See [docker-compose.yaml](docker-compose.yaml) for the full configuration.
+
+## Why This Approach?
+
+The official UniFi OS Server installer is designed for bare-metal Linux with systemd. It:
+1. Creates a `uosserver` user
+2. Loads an embedded OCI image (`uosserver:0.0.54`) into Podman
+3. Starts a nested Podman container with `pasta` networking
+
+This nested approach doesn't work well in Docker. Instead, we:
+1. **Extract** the inner `uosserver` image from the installer
+2. **Run systemd directly** (no Podman-in-Docker)
+3. **Use Docker's networking** instead of pasta
+
+The result is a clean, reproducible image that runs the official UniFi OS services.
 
 ## Supported Architectures
 
@@ -21,83 +41,106 @@ The runtime compose file lives in [docker/docker-compose.yml](/opt/unifi-os-serv
 |--------------|-----|
 | x86_64 (amd64) | `giiibates/unifi-os-server:latest` |
 
-The published image is currently amd64-only.
+Currently amd64-only.
 
 ## Building Release Images
 
-### Using build.sh (recommended)
-
 ```bash
-# 1. Export the upstream installer URL
+# Required: Set the installer URL
 export UNIFI_OS_URL_X64="https://fw-download.ubnt.com/data/unifi-os-server/...-x64"
 
-# Optional: keep arm64 URL beside it for later use
-export UNIFI_OS_URL_ARM64="https://fw-download.ubnt.com/data/unifi-os-server/...-arm64"
+# Build and push
+./docker/build.sh
 
-# 2. Log in once
-docker login
-
-# 3. Build, preinstall, and push for the native host architecture
-./build.sh
-
-# Optional: override the tag that is otherwise derived from the amd64 URL
-VERSION=5.0.6 ./build.sh
-
-# Optional: keep the arch-specific image only in the local Docker daemon
-PUSH=false ./build.sh
-
-# Optional: override the platform explicitly
-PLATFORMS=linux/amd64 ./build.sh
+# Or build locally without pushing
+PUSH=false ./docker/build.sh
 ```
 
-`build.sh` does the full release flow automatically:
+The build process:
+1. Builds an extractor image with Podman
+2. Runs the Ubiquiti installer (fails at container start, but extracts the image)
+3. Exports the `uosserver` image from Podman storage
+4. Builds a runtime image with our entrypoint
+5. Optionally validates the image starts correctly
 
-1. Reads the amd64 installer URL from `UNIFI_OS_URL_X64`
-2. Builds a base image for the requested native platform
-3. Starts a privileged install container for that architecture
-4. Waits for the UniFi installation to finish
-5. Commits the installed filesystem into final runtime images
-6. Pushes the architecture tag plus `:version` and `:latest`
-
-The upstream installer binary is used only during the build container phase and is not part of the final published image.
-
-If you want to keep the exports in a file locally, you can put them into [setup.conf](/opt/unifi-os-server/setup.conf) and load them with `source setup.conf` before running `./build.sh`.
-
-Important: the active release path is currently amd64-only. Run the build on an amd64 host or runner.
-
-### Base Image Only
-
-```bash
-docker buildx build \
-  --platform linux/amd64 \
-  -f docker/Dockerfile \
-  -t giiibates/unifi-os-server:base-test \
-  .
-```
-
-This path builds only the installer-capable base image. It does not create the preinstalled runtime image that end users should pull.
-
-## Environment Variables
+### Environment Variables for Build
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `UOS_SYSTEM_IP` | - | System IP/hostname for device adoption |
-| `UOS_INSTALL_ON_BOOT` | `0` in published images | Published images skip installer bootstrapping |
-| `UOS_FORCE_INSTALL` | `0` | Force reinstall |
-| `UOS_NETWORK_MODE` | `pasta` | Container network mode |
-| `UOS_WEB_PORT` | `8443` | Web interface port |
-| `UOS_UID` | `1000` | User ID for uosserver |
+| `UNIFI_OS_URL_X64` | - | Installer URL (required) |
+| `IMAGE_NAME` | `giiibates/unifi-os-server` | Target image name |
+| `VERSION` | from URL | Version tag |
+| `PUSH` | `true` | Push to registry |
+| `SKIP_VALIDATION` | `false` | Skip runtime validation |
+
+## Runtime Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UOS_SYSTEM_IP` | - | Hostname/IP for device adoption |
 | `HARDWARE_PLATFORM` | - | Set to `synology` for Synology NAS |
+| `UOS_UUID` | auto | Custom UUID (persisted to /data/uos_uuid) |
+
+### Required Container Settings
+
+The container requires these settings for systemd:
+
+```yaml
+cgroup: host
+cap_add:
+  - NET_RAW
+  - NET_ADMIN
+tmpfs:
+  - /run:exec
+  - /run/lock
+  - /tmp:exec
+  - /var/lib/journal
+volumes:
+  - /sys/fs/cgroup:/sys/fs/cgroup:rw
+stop_signal: SIGRTMIN+3
+```
 
 ## Ports
 
 | Protocol | Port | Direction | Usage |
 |----------|------|-----------|-------|
 | TCP | 11443 | Ingress | UniFi OS Server GUI/API |
-| TCP | 5005 | Ingress | RTP (Real-time Transport Protocol) control protocol |
+| TCP | 8080 | Ingress | Device communication (required) |
+| TCP | 8443 | Ingress | UniFi Network Application GUI/API |
+| UDP | 3478 | Both | STUN for device adoption (required) |
+| UDP | 10003 | Ingress | Device discovery (required) |
+| TCP | 5005 | Ingress | RTP control |
 | TCP | 9543 | Ingress | UniFi Identity Hub |
-| TCP | 6789 | Ingress | UniFi mobile speed test |
-| TCP | 8080 | Ingress | Device and application communication |
+| TCP | 6789 | Ingress | Mobile speed test |
+| TCP | 8444 | Ingress | Hotspot portal (HTTPS) |
+| UDP | 5514 | Ingress | Remote syslog |
+| TCP | 11084 | Ingress | Site Supervisor |
+| TCP | 5671 | Ingress | AMQPS |
+| TCP | 8880-8882 | Ingress | Hotspot portal (HTTP) |
+
+## Device Adoption
+
+To adopt devices, set `UOS_SYSTEM_IP` to your server's hostname or IP:
+
+```yaml
+environment:
+  - UOS_SYSTEM_IP=unifi.example.com
+```
+
+Then SSH into each device and run:
+```bash
+set-inform http://$UOS_SYSTEM_IP:8080/inform
+```
+
+## Acknowledgments
+
+Inspired by [lemker/unifi-os-server](https://github.com/lemker/unifi-os-server).
+
+## License
+
+See [LICENSE](LICENSE).
 | TCP | 8443 | Ingress | UniFi Network Application GUI/API |
 | TCP | 8444 | Ingress | Secure Portal for Hotspot |
 | UDP | 3478 | Both | STUN for device adoption and communication (also required for Remote Management) |

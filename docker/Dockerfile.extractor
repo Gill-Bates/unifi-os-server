@@ -1,0 +1,54 @@
+# Extractor base image: provides the environment needed to run the Ubiquiti installer.
+# The installer is run in a privileged container from this image, not during build.
+FROM debian:trixie-slim
+
+ARG UOS_INSTALLER_URL
+ARG UOS_UID="1000"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+	UOS_INSTALLER_URL=${UOS_INSTALLER_URL}
+
+# Install podman and dependencies for the installer
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		bash \
+		ca-certificates \
+		curl \
+		fuse-overlayfs \
+		iproute2 \
+		iptables \
+		jq \
+		kmod \
+		passwd \
+		passt \
+		podman \
+		procps \
+		slirp4netns \
+		systemd \
+		uidmap \
+		util-linux \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Create directories the installer expects (but NOT the user - installer creates it)
+RUN mkdir -p \
+		/opt/uos/installer \
+		/etc/containers \
+		/var/lib/containers/storage \
+		/var/lib/uosserver \
+		/var/lib/systemd/linger
+
+# Stub loginctl to avoid installer spinning on user-status
+COPY --chmod=755 docker/loginctl-stub.sh /usr/local/bin/loginctl
+RUN mv /usr/bin/loginctl /usr/bin/loginctl.real 2>/dev/null || true \
+	&& ln -sf /usr/local/bin/loginctl /usr/bin/loginctl
+
+# Stub systemctl for non-systemd environment
+COPY --chmod=755 docker/systemctl-stub.sh /usr/local/bin/systemctl
+RUN mv /usr/bin/systemctl /usr/bin/systemctl.real 2>/dev/null || true \
+	&& ln -sf /usr/local/bin/systemctl /usr/bin/systemctl
+
+# Copy extraction script
+COPY --chmod=755 docker/extract-uosserver.sh /usr/local/bin/extract-uosserver.sh
+
+# Default: run extraction script
+CMD ["/usr/local/bin/extract-uosserver.sh"]

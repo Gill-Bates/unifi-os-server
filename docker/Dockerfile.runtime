@@ -1,0 +1,29 @@
+# Runtime image: based on extracted uosserver image from Ubiquiti installer.
+# This image runs systemd directly - no nested podman.
+#
+# Build arg UOSSERVER_IMAGE must point to the extracted uosserver image tag.
+ARG UOSSERVER_IMAGE
+
+FROM ${UOSSERVER_IMAGE}
+
+ARG APP_VERSION="dev"
+ARG BUILD_DATE="unknown"
+
+LABEL org.opencontainers.image.title="unifi-os-server" \
+	org.opencontainers.image.version=${APP_VERSION} \
+	org.opencontainers.image.created=${BUILD_DATE} \
+	org.opencontainers.image.source="https://github.com/giiibates/unifi-os-server" \
+	org.opencontainers.image.description="UniFi OS Server in Docker (amd64)"
+
+# Environment variables for configuration
+ENV UOS_SERVER_VERSION="${APP_VERSION}" \
+	UOS_SYSTEM_IP="" \
+	HARDWARE_PLATFORM=""
+
+# Copy our entrypoint that configures the container before starting systemd
+COPY --chmod=755 docker/uos-entrypoint.sh /root/uos-entrypoint.sh
+
+# systemd needs SIGRTMIN+3 for clean shutdown
+STOPSIGNAL SIGRTMIN+3
+
+ENTRYPOINT ["/root/uos-entrypoint.sh"]
