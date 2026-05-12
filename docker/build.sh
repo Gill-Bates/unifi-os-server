@@ -19,12 +19,22 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
+# Load .env if present
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+    # shellcheck disable=SC1091
+    set -a
+    source "${REPO_ROOT}/.env"
+    set +a
+fi
+
 IMAGE_NAME="${IMAGE_NAME:-giiibates/unifi-os-server}"
-PLATFORMS="${PLATFORMS:-linux/amd64}"
+PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 PUSH="${PUSH:-true}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 VERSION="${VERSION:-}"
 BUILD_ARTIFACTS_DIR="${BUILD_ARTIFACTS_DIR:-/tmp/uos-build-$$}"
+DOWNLOAD_API_URL="${DOWNLOAD_API_URL:-https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -277,8 +287,6 @@ host_arch() {
 #######################################
 # URL CONFIGURATION
 #######################################
-
-DOWNLOAD_API_URL="https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server"
 
 fetch_urls_from_api() {
     log "Fetching latest URLs from Ubiquiti API..."
