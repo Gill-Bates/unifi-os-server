@@ -1,3 +1,4 @@
 uos*/
 unifi-os-server.conf
 03_unifi-os-server.xml
+*.har
