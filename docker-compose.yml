@@ -27,7 +27,7 @@ services:
     # this project directory instead of ending up in hidden Docker volumes.
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
-      - ./uos-home:/home/uosserver
+      - ./uos-data/home:/home/uosserver
       - ./uos-data:/var/lib/uosserver
       - ./uos-config:/etc/uosserver
       - ./uos-logs:/var/log/uosserver

@@ -287,6 +287,11 @@ main() {
 
         if [[ "$should_install" == "1" ]]; then
             run_installer
+            # Cleanup: Remove installer binary to save disk space (~500MB)
+            if [[ -f "$installer_path" ]]; then
+                log "removing installer binary to save disk space"
+                rm -f "$installer_path"
+            fi
         else
             log "existing UOS installation detected; skipping installer"
         fi
