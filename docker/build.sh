@@ -650,10 +650,13 @@ build_runtime_image() {
 
     log "Phase 4: Building runtime image for linux/${arch}"
 
-    # Use DOCKER_DEFAULT_PLATFORM as additional safeguard for buildx
-    if ! DOCKER_DEFAULT_PLATFORM="linux/${arch}" docker build \
+    # Use 'docker buildx build --builder default' to use the standard Docker builder
+    # instead of any buildx container-driver builder (which can't see local images).
+    # Don't use --pull since uosserver is a locally loaded image, not from a registry.
+    if ! DOCKER_DEFAULT_PLATFORM="linux/${arch}" docker buildx build \
+        --builder default \
         --platform "linux/${arch}" \
-        --pull \
+        --load \
         --file "${REPO_ROOT}/docker/Dockerfile.runtime" \
         --tag "$final_tag" \
         --build-arg "UOSSERVER_IMAGE=${uosserver_tag}" \
