@@ -8,7 +8,8 @@ ARG UOS_UID="1000"
 ENV DEBIAN_FRONTEND=noninteractive \
 	UOS_INSTALLER_URL=${UOS_INSTALLER_URL}
 
-# Install podman and dependencies for the installer
+# Install podman, skopeo and dependencies for the installer
+# skopeo is required for reliable OCI-to-Docker format conversion
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		bash \
@@ -23,6 +24,7 @@ RUN apt-get update \
 		passt \
 		podman \
 		procps \
+		skopeo \
 		slirp4netns \
 		systemd \
 		uidmap \
