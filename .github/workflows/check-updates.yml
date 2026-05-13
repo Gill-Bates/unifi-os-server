@@ -28,7 +28,7 @@ concurrency:
 jobs:
   check-version:
     name: Check for new version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       new_version_available: ${{ steps.check.outputs.new_version_available }}
       current_version: ${{ steps.check.outputs.current_version }}

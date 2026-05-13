@@ -34,7 +34,7 @@ concurrency:
 jobs:
   build-amd64:
     name: Build amd64 image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.build.outputs.version }}
     permissions:
@@ -151,7 +151,7 @@ jobs:
     name: Create multi-arch manifest
     needs: [build-amd64, build-arm64]
     if: always() && needs.build-amd64.result == 'success' && github.event.inputs.push != 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
 
