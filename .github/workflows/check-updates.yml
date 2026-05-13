@@ -150,7 +150,8 @@ jobs:
     if: needs.check-version.outputs.new_version_available == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      actions: write
+      contents: read
 
     steps:
       - name: Trigger build workflow
