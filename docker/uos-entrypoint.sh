@@ -81,6 +81,14 @@ if [ ! -d "$UNIFI_CORE_CONFIG_DIR" ]; then
     chmod 755 "$UNIFI_CORE_CONFIG_DIR"
 fi
 
+# The initial unifi-core bootstrap can take several minutes on first boot.
+# Override the default systemd start timeout so systemd does not kill it early.
+mkdir -p /etc/systemd/system/unifi-core.service.d
+{
+    echo "[Service]"
+    echo "TimeoutStartSec=10min"
+} > /etc/systemd/system/unifi-core.service.d/override.conf
+
 # Apply Synology patches
 SYS_VENDOR="/sys/class/dmi/id/sys_vendor"
 if { [ -f "$SYS_VENDOR" ] && grep -q "Synology" "$SYS_VENDOR"; } \

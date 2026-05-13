@@ -1,0 +1,110 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>unifi-os-server</Name>
+  <!-- Floating tag for the newest published build; pin to :5.0.6-amd64 if required -->
+  <Repository>giiibates/unifi-os-server:latest</Repository>
+  <Registry>https://hub.docker.com/r/giiibates/unifi-os-server</Registry>
+  <Network>br0.200</Network>
+  <MyIP>10.20.0.9</MyIP>
+  <Shell>bash</Shell>
+  <Privileged>true</Privileged>
+  <Support>https://github.com/Gill-Bates/unifi-os-server/issues</Support>
+  <Project>https://github.com/Gill-Bates/unifi-os-server</Project>
+  <Overview>UniFi OS Server running in Docker with systemd. Extracted from official Ubiquiti installer binary. Provides the full UniFi OS experience including Network Controller, Identity Enterprise, and other UniFi applications.
+
+Requirements:
+- Privileged mode (systemd needs full access)
+- cgroupns=host for proper cgroup management
+- Static IP recommended for network stability
+
+Source: https://github.com/Gill-Bates/unifi-os-server
+Docker: https://hub.docker.com/r/giiibates/unifi-os-server</Overview>
+  <Category>Network:Management</Category>
+  <WebUI>https://[IP]:443</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/Gill-Bates/unraid-app-templates/main/community-apps/03_unifi-os-server.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/Gill-Bates/unraid-app-templates/main/icons/03_unifi-os-server.png</Icon>
+  <ExtraParams>--hostname=unifi --pids-limit=-1 --cgroupns=host --stop-signal=SIGRTMIN+3 --stop-timeout=120 --dns=1.1.1.1 --dns=9.9.9.9 --sysctl net.ipv4.ip_unprivileged_port_start=0 --add-host=unifi.lan:10.20.0.9 --tmpfs /run --tmpfs /run/lock --tmpfs /tmp --tmpfs /var/lib/journal --tmpfs /var/opt/unifi/tmp:size=64m --restart unless-stopped</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <Date>2026-05-12</Date>
+  <Changes>
+5.0.6: Initial release with extraction-based build from official Ubiquiti installer.
+  </Changes>
+  <Networking>
+    <Mode>br0.200</Mode>
+  </Networking>
+  <Data>
+    <Volume>
+      <HostDir>/sys/fs/cgroup</HostDir>
+      <ContainerDir>/sys/fs/cgroup</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/user/docker/container/unifi-os-server/uos-home</HostDir>
+      <ContainerDir>/home/uosserver</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/user/docker/container/unifi-os-server/uos-data</HostDir>
+      <ContainerDir>/var/lib/uosserver</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/user/docker/container/unifi-os-server/uos-config</HostDir>
+      <ContainerDir>/etc/uosserver</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/user/docker/container/unifi-os-server/uos-logs</HostDir>
+      <ContainerDir>/var/log/uosserver</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/user/docker/container/unifi-os-server/uos-containers</HostDir>
+      <ContainerDir>/var/lib/containers/storage</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/user/docker/container/unifi-os-server/uos-unifi</HostDir>
+      <ContainerDir>/var/lib/unifi</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+    <Volume>
+      <HostDir>/mnt/user/docker/container/unifi-os-server/uos-mongodb</HostDir>
+      <ContainerDir>/var/lib/mongodb</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+  </Data>
+  <Environment>
+    <Variable>
+      <Name>container</Name>
+      <Value>docker</Value>
+    </Variable>
+    <Variable>
+      <Name>UOS_SYSTEM_IP</Name>
+      <Value>unifi.lan</Value>
+    </Variable>
+    <Variable>
+      <Name>UOS_INSTALL_ON_BOOT</Name>
+      <Value>0</Value>
+    </Variable>
+    <Variable>
+      <Name>UOS_FORCE_INSTALL</Name>
+      <Value>0</Value>
+    </Variable>
+  </Environment>
+  <!-- Environment Variables -->
+  <Config Name="container" Target="container" Default="docker" Mode="" Description="Container runtime identifier (do not change)" Type="Variable" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="UOS_SYSTEM_IP" Target="UOS_SYSTEM_IP" Default="unifi.lan" Mode="" Description="Hostname or IP for UniFi OS to bind to" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="UOS_INSTALL_ON_BOOT" Target="UOS_INSTALL_ON_BOOT" Default="0" Mode="" Description="Run installer on boot (0=no, 1=yes)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="UOS_FORCE_INSTALL" Target="UOS_FORCE_INSTALL" Default="0" Mode="" Description="Force reinstall (0=no, 1=yes)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <!-- Volume Mappings -->
+  <Config Name="Cgroup" Target="/sys/fs/cgroup" Default="/sys/fs/cgroup" Mode="rw" Description="Cgroup filesystem (required for systemd)" Type="Path" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="UOS Home" Target="/home/uosserver" Default="/mnt/user/docker/container/unifi-os-server/uos-home" Mode="rw" Description="UniFi OS user home directory" Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="UOS Data" Target="/var/lib/uosserver" Default="/mnt/user/docker/container/unifi-os-server/uos-data" Mode="rw" Description="UniFi OS application data" Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="UOS Config" Target="/etc/uosserver" Default="/mnt/user/docker/container/unifi-os-server/uos-config" Mode="rw" Description="UniFi OS configuration" Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="UOS Logs" Target="/var/log/uosserver" Default="/mnt/user/docker/container/unifi-os-server/uos-logs" Mode="rw" Description="UniFi OS logs" Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="UOS Containers" Target="/var/lib/containers/storage" Default="/mnt/user/docker/container/unifi-os-server/uos-containers" Mode="rw" Description="Podman container storage (internal)" Type="Path" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="UniFi Data" Target="/var/lib/unifi" Default="/mnt/user/docker/container/unifi-os-server/uos-unifi" Mode="rw" Description="UniFi Network Controller data" Type="Path" Display="always" Required="true" Mask="false"/>
+  <Config Name="MongoDB Data" Target="/var/lib/mongodb" Default="/mnt/user/docker/container/unifi-os-server/uos-mongodb" Mode="rw" Description="MongoDB database files" Type="Path" Display="always" Required="true" Mask="false"/>
+</Container>
