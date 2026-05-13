@@ -17,6 +17,9 @@
 
 This guide is written from an end-user perspective. If you want to run UniFi OS Server, you will usually only need [docker-compose.yaml](/opt/unifi-os-server/docker-compose.yaml). 🚀
 
+> [⚠️ WARNING ⚠️]
+> *Trivy scans may report HIGH or CRITICAL vulnerabilities in this image. This project ships the official UniFi OS Server software from Ubiquiti, so those findings are often in upstream vendor components and cannot be fixed in this repository alone. The actual security fix must come from Ubiquiti and can only be picked up here once they ship an updated upstream release.*
+
 ## Requirements
 
 - Docker Engine with `docker compose`
