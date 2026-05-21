@@ -2,24 +2,25 @@
 # This image runs systemd directly - no nested podman.
 #
 # Build arg UOSSERVER_IMAGE must point to the extracted uosserver image tag.
-# The default is a placeholder - always pass --build-arg UOSSERVER_IMAGE=...
-ARG UOSSERVER_IMAGE=uosserver:latest
+# The build must fail unless it is passed explicitly.
+ARG UOSSERVER_IMAGE
 
 FROM ${UOSSERVER_IMAGE}
 
-ARG APP_VERSION="dev"
+ARG TARGETARCH
+ARG APP_VERSION
 ARG BUILD_DATE="unknown"
+
+RUN test -n "$APP_VERSION" && test "$APP_VERSION" != "dev"
 
 LABEL org.opencontainers.image.title="unifi-os-server" \
 	org.opencontainers.image.version=${APP_VERSION} \
 	org.opencontainers.image.created=${BUILD_DATE} \
 	org.opencontainers.image.source="https://github.com/giiibates/unifi-os-server" \
-	org.opencontainers.image.description="UniFi OS Server in Docker (amd64)"
+	org.opencontainers.image.description="UniFi OS Server in Docker (${TARGETARCH})"
 
 # Environment variables for configuration
-ENV UOS_SERVER_VERSION="${APP_VERSION}" \
-	UOS_SYSTEM_IP="" \
-	HARDWARE_PLATFORM=""
+ENV UOS_SERVER_VERSION="${APP_VERSION}"
 
 # Copy our entrypoint that configures the container before starting systemd
 COPY --chmod=755 docker/uos-entrypoint.sh /root/uos-entrypoint.sh

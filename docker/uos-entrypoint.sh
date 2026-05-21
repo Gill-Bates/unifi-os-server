@@ -15,10 +15,42 @@ log_error() { echo "[$(date -Iseconds)] ERROR: $*" >&2; }
 # -----------------------------------------------------------------------------
 ensure_dir() {
     local dir="$1" owner="${2:-root}" perms="${3:-755}"
-    if [ ! -d "$dir" ]; then
-        mkdir -p "$dir"
-        chown "$owner:$owner" "$dir" 2>/dev/null || true
-        chmod "$perms" "$dir"
+    mkdir -p "$dir"
+    chown "$owner:$owner" "$dir" 2>/dev/null || true
+    chmod "$perms" "$dir"
+}
+
+validate_uos_uuid() {
+    local uuid="$1"
+
+    if [ -z "$uuid" ] || printf '%s' "$uuid" | grep -Eq '[[:cntrl:]]'; then
+        log_error "Invalid UOS_UUID"
+        exit 1
+    fi
+
+    if ! printf '%s' "$uuid" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-5[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'; then
+        log_error "Invalid UOS_UUID: $uuid"
+        exit 1
+    fi
+}
+
+write_uos_uuid() {
+    local uuid="$1"
+    validate_uos_uuid "$uuid"
+    printf '%s\n' "$uuid" > /data/uos_uuid
+}
+
+validate_system_ip() {
+    local system_ip="$1"
+
+    if [ -z "$system_ip" ] || printf '%s' "$system_ip" | grep -Eq '[[:cntrl:]]'; then
+        log_error "Invalid UOS_SYSTEM_IP"
+        exit 1
+    fi
+
+    if ! printf '%s' "$system_ip" | grep -Eq '^([A-Za-z0-9.-]+|[0-9a-fA-F:]+)$'; then
+        log_error "Invalid UOS_SYSTEM_IP: $system_ip"
+        exit 1
     fi
 }
 
@@ -37,16 +69,16 @@ fi
 # checks the format. We generate a random UUID and set the version nibble to '5'.
 # -----------------------------------------------------------------------------
 if [ ! -f /data/uos_uuid ]; then
-    if [ -n "${UOS_UUID+1}" ]; then
+    if [ -n "${UOS_UUID:-}" ]; then
         log_info "Setting UOS_UUID to $UOS_UUID"
-        echo "$UOS_UUID" > /data/uos_uuid
+        write_uos_uuid "$UOS_UUID"
     else
         log_info "No UOS_UUID present, generating..."
         UUID=$(cat /proc/sys/kernel/random/uuid)
         # Set version nibble (position 14, 0-indexed) to '5' for UUIDv5 format
         UOS_UUID=$(echo "$UUID" | sed 's/./5/15')
         log_info "Setting UOS_UUID to $UOS_UUID"
-        echo "$UOS_UUID" > /data/uos_uuid
+        write_uos_uuid "$UOS_UUID"
     fi
 fi
 
@@ -141,8 +173,8 @@ preseed_postgres() {
     # Start PostgreSQL temporarily with shorter timeout (fail fast if broken)
     if ! runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" \
          -l /var/log/postgresql/startup.log start -w -t 30 2>/dev/null; then
-        log_warn "PostgreSQL temporary start failed, skipping pre-seed (services will bootstrap themselves)"
-        return 0
+        log_warn "PostgreSQL temporary start failed, will retry pre-seed on next boot"
+        return 1
     fi
     
     # Wait for PostgreSQL to accept connections (quick sanity check)
@@ -156,9 +188,9 @@ preseed_postgres() {
     done
     
     if [ $retries -eq 0 ]; then
-        log_warn "PostgreSQL not accepting connections, skipping pre-seed"
+        log_warn "PostgreSQL not accepting connections, will retry pre-seed on next boot"
         runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast 2>/dev/null || true
-        return 0
+        return 1
     fi
     
     # -------------------------------------------------------------------------
@@ -210,8 +242,11 @@ PRESEED_MARKER_VERSION="1"
 PRESEED_MARKER="/data/.postgres_preseeded_v${PRESEED_MARKER_VERSION}"
 
 if [ ! -f "$PRESEED_MARKER" ]; then
-    preseed_postgres
-    touch "$PRESEED_MARKER"
+    if preseed_postgres; then
+        touch "$PRESEED_MARKER"
+    else
+        log_warn "PostgreSQL pre-seeding incomplete; marker not written"
+    fi
 fi
 
 # Apply Synology patches
@@ -253,14 +288,19 @@ fi
 UNIFI_SYSTEM_PROPERTIES="/var/lib/unifi/system.properties"
 if [ -n "${UOS_SYSTEM_IP+1}" ] && [ -n "$UOS_SYSTEM_IP" ]; then
     log_info "Setting UOS_SYSTEM_IP to $UOS_SYSTEM_IP"
+    validate_system_ip "$UOS_SYSTEM_IP"
     mkdir -p "$(dirname "$UNIFI_SYSTEM_PROPERTIES")"
     if [ ! -f "$UNIFI_SYSTEM_PROPERTIES" ]; then
-        echo "system_ip=$UOS_SYSTEM_IP" >> "$UNIFI_SYSTEM_PROPERTIES"
+        printf 'system_ip=%s\n' "$UOS_SYSTEM_IP" > "$UNIFI_SYSTEM_PROPERTIES"
     else
         if grep -q "^system_ip=.*" "$UNIFI_SYSTEM_PROPERTIES"; then
-            sed -i 's/^system_ip=.*/system_ip='"$UOS_SYSTEM_IP"'/' "$UNIFI_SYSTEM_PROPERTIES"
+            tmp_file=$(mktemp)
+            grep -v '^system_ip=' "$UNIFI_SYSTEM_PROPERTIES" > "$tmp_file"
+            printf 'system_ip=%s\n' "$UOS_SYSTEM_IP" >> "$tmp_file"
+            install -m 0644 "$tmp_file" "$UNIFI_SYSTEM_PROPERTIES"
+            rm -f "$tmp_file"
         else
-            echo "system_ip=$UOS_SYSTEM_IP" >> "$UNIFI_SYSTEM_PROPERTIES"
+            printf 'system_ip=%s\n' "$UOS_SYSTEM_IP" >> "$UNIFI_SYSTEM_PROPERTIES"
         fi
     fi
 fi

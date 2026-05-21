@@ -20,25 +20,51 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-# Save explicitly set environment variables (they take precedence over .env)
-_saved_IMAGE_NAME="${IMAGE_NAME:-}"
-_saved_PLATFORMS="${PLATFORMS:-}"
-_saved_PUSH="${PUSH:-}"
-_saved_DOWNLOAD_API_URL="${DOWNLOAD_API_URL:-}"
+load_dotenv_defaults() {
+    local env_file="${REPO_ROOT}/.env"
+    [[ -f "$env_file" ]] || return 0
 
-# Load .env if present (provides defaults)
-if [[ -f "${REPO_ROOT}/.env" ]]; then
-    # shellcheck disable=SC1091
-    set -a
-    source "${REPO_ROOT}/.env"
-    set +a
-fi
+    local line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
 
-# Restore explicitly set variables (override .env)
-[[ -n "$_saved_IMAGE_NAME" ]] && IMAGE_NAME="$_saved_IMAGE_NAME"
-[[ -n "$_saved_PLATFORMS" ]] && PLATFORMS="$_saved_PLATFORMS"
-[[ -n "$_saved_PUSH" ]] && PUSH="$_saved_PUSH"
-[[ -n "$_saved_DOWNLOAD_API_URL" ]] && DOWNLOAD_API_URL="$_saved_DOWNLOAD_API_URL"
+        if ! [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+            printf '%s\n' "[build] Invalid .env line: $line" >&2
+            exit 1
+        fi
+
+        key="${BASH_REMATCH[1]}"
+        value="${BASH_REMATCH[2]}"
+
+        if [[ ${#value} -ge 2 ]]; then
+            case "$value" in
+                '"'*)
+                    if [[ "${value: -1}" == '"' ]]; then
+                        value="${value:1:${#value}-2}"
+                    fi
+                    ;;
+                "'"*)
+                    if [[ "${value: -1}" == "'" ]]; then
+                        value="${value:1:${#value}-2}"
+                    fi
+                    ;;
+            esac
+        fi
+
+        case "$key" in
+            IMAGE_NAME|PLATFORMS|PUSH|DOWNLOAD_API_URL|UNIFI_OS_URL_X64|UNIFI_OS_URL_ARM64|VERSION|BUILD_ARTIFACTS_DIR|BUILD_DATE|PRESERVE_FAILURE_CONTAINERS|SKIP_VALIDATION|EXPORT_FAILURE_FILESYSTEM)
+                [[ -n "${!key:-}" ]] || printf -v "$key" '%s' "$value"
+                ;;
+            *)
+                printf '%s\n' "[build] Unsupported .env key: $key" >&2
+                exit 1
+                ;;
+        esac
+    done < "$env_file"
+}
+
+load_dotenv_defaults
 
 # Set defaults for anything still unset
 IMAGE_NAME="${IMAGE_NAME:-giiibates/unifi-os-server}"
@@ -310,6 +336,31 @@ extract_version_from_url() {
     printf '%s\n' "$version"
 }
 
+validate_version() {
+    local version="$1"
+    [[ "$version" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]] || fatal "Invalid version: $version"
+}
+
+validate_api_url() {
+    local url="$1"
+    [[ "$url" =~ ^https://[^[:space:]]+$ ]] || fatal "Invalid DOWNLOAD_API_URL: must be HTTPS without whitespace"
+    case "$url" in
+        https://download.svc.ui.com/*) ;;
+        *) fatal "Invalid DOWNLOAD_API_URL host: $url" ;;
+    esac
+}
+
+validate_installer_url() {
+    local url="$1"
+    local label="$2"
+
+    [[ "$url" =~ ^https://[^[:space:]]+$ ]] || fatal "Invalid $label URL: must be HTTPS without whitespace"
+    case "$url" in
+        https://*.ui.com/*|https://ui.com/*|https://dl.ui.com/*) ;;
+        *) fatal "Invalid $label URL host: $url" ;;
+    esac
+}
+
 host_arch() {
     case "$(uname -m)" in
         x86_64|amd64) printf 'amd64\n' ;;
@@ -328,13 +379,19 @@ can_emulate_arch() {
     
     # Check binfmt_misc for the target architecture
     local binfmt_path="/proc/sys/fs/binfmt_misc"
+    binfmt_enabled() {
+        local entry="$1"
+        [[ -f "$entry" ]] || return 1
+        grep -q '^enabled$' "$entry"
+    }
+
     if [[ -d "$binfmt_path" ]]; then
         case "$target_arch" in
             arm64|aarch64)
-                [[ -f "$binfmt_path/qemu-aarch64" ]] && return 0
+                binfmt_enabled "$binfmt_path/qemu-aarch64" && return 0
                 ;;
             amd64|x86_64)
-                [[ -f "$binfmt_path/qemu-x86_64" ]] && return 0
+                binfmt_enabled "$binfmt_path/qemu-x86_64" && return 0
                 ;;
         esac
     fi
@@ -348,20 +405,47 @@ can_emulate_arch() {
 
 fetch_urls_from_api() {
     log "Fetching latest URLs from Ubiquiti API..."
-    local response
-    response=$(curl -fsSL --retry 3 --retry-delay 2 --max-time 30 "$DOWNLOAD_API_URL" 2>/dev/null) || {
+    local response latest_row
+    response=$(curl --fail --silent --show-error --location \
+        --connect-timeout 10 \
+        --max-time 30 \
+        --retry 3 \
+        --retry-all-errors \
+        "$DOWNLOAD_API_URL") || {
         error "Failed to fetch from API (curl exit: $?)"
         return 1
     }
-    
-    amd64_url=$(echo "$response" | jq -r '[.downloads[] | select(.name | test("Linux.*x64"; "i"))] | sort_by(.version) | reverse | .[0].file_url // empty')
-    arm64_url=$(echo "$response" | jq -r '[.downloads[] | select(.name | test("Linux.*arm64"; "i"))] | sort_by(.version) | reverse | .[0].file_url // empty')
-    
-    if [[ -z "$amd64_url" ]]; then
-        error "Could not find x64 download URL in API response"
-        return 1
+
+    if ! jq -e '.downloads | type == "array"' >/dev/null <<< "$response"; then
+        fatal "Unexpected API response: downloads array missing"
     fi
     
+    latest_row=$(
+        jq -r '
+          .downloads
+          | map(select(.name | test("Linux.*(x64|arm64)"; "i")))
+          | sort_by(.version)
+          | group_by(.version)
+          | map({
+              version: .[0].version,
+              x64: (map(select(.name | test("Linux.*x64"; "i")))[0].file_url // ""),
+              arm64: (map(select(.name | test("Linux.*arm64"; "i")))[0].file_url // "")
+            })
+          | map(select(.x64 != "" and .arm64 != ""))
+          | .[]
+          | [.version, .x64, .arm64]
+          | @tsv
+        ' <<< "$response" | sort -t $'\t' -k1,1V | tail -1
+    )
+
+    [[ -n "$latest_row" ]] || fatal "No complete amd64/arm64 Linux release found"
+
+    IFS=$'\t' read -r VERSION amd64_url arm64_url <<< "$latest_row"
+
+    validate_version "$VERSION"
+    validate_installer_url "$amd64_url" "amd64"
+    validate_installer_url "$arm64_url" "arm64"
+
     log "Found x64 URL: $amd64_url"
     log "Found arm64 URL: $arm64_url"
 }
@@ -370,13 +454,42 @@ load_config() {
     # Use environment variables if set, otherwise fetch from API
     amd64_url="${UNIFI_OS_URL_X64:-}"
     arm64_url="${UNIFI_OS_URL_ARM64:-}"
+
+    validate_api_url "$DOWNLOAD_API_URL"
     
-    if [[ -z "$amd64_url" ]]; then
+    if [[ -z "$amd64_url" && -z "$arm64_url" ]]; then
         fetch_urls_from_api || fatal "Failed to fetch URLs from API"
     fi
 
     if [[ -z "$VERSION" ]]; then
-        VERSION="$(extract_version_from_url "$amd64_url")"
+        if [[ -n "$amd64_url" ]]; then
+            VERSION="$(extract_version_from_url "$amd64_url")"
+        elif [[ -n "$arm64_url" ]]; then
+            VERSION="$(extract_version_from_url "$arm64_url")"
+        fi
+    fi
+
+    if [[ -n "$amd64_url" && -n "$arm64_url" ]]; then
+        local amd64_version arm64_version
+        amd64_version="$(extract_version_from_url "$amd64_url")"
+        arm64_version="$(extract_version_from_url "$arm64_url")"
+        [[ "$amd64_version" == "$arm64_version" ]] || fatal "amd64 and arm64 installer URLs reference different versions: $amd64_version vs $arm64_version"
+        if [[ -z "$VERSION" ]]; then
+            VERSION="$amd64_version"
+        elif [[ "$VERSION" != "$amd64_version" ]]; then
+            fatal "VERSION does not match installer URLs: $VERSION vs $amd64_version"
+        fi
+    fi
+
+    [[ -n "$VERSION" ]] || fatal "Could not determine version"
+    validate_version "$VERSION"
+
+    if [[ -n "$amd64_url" ]]; then
+        validate_installer_url "$amd64_url" "amd64"
+    fi
+
+    if [[ -n "$arm64_url" ]]; then
+        validate_installer_url "$arm64_url" "arm64"
     fi
 
     IFS=',' read -r -a requested_platforms <<<"$PLATFORMS"
@@ -428,6 +541,7 @@ installer_url_for_arch() {
 build_extractor_image() {
     local arch="$1"
     local installer_url="$2"
+    local __out="$3"
     local extractor_tag="uos-extractor:${VERSION}-${arch}"
 
     log "Phase 1: Building extractor image for linux/${arch}"
@@ -438,12 +552,11 @@ build_extractor_image() {
         --pull \
         --file "${REPO_ROOT}/docker/Dockerfile.extractor" \
         --tag "$extractor_tag" \
-        --build-arg "UOS_INSTALLER_URL=${installer_url}" \
         "$REPO_ROOT" >&2; then
         fatal "Failed to build extractor image"
     fi
 
-    printf '%s\n' "$extractor_tag"
+    printf -v "$__out" '%s' "$extractor_tag"
 }
 
 #######################################
@@ -453,6 +566,7 @@ build_extractor_image() {
 run_extraction() {
     local arch="$1"
     local extractor_tag="$2"
+    local __out="$3"
     local container_name="uos-extract-${arch}-$$"
     local output_dir="${BUILD_ARTIFACTS_DIR}/extract-${arch}"
 
@@ -467,6 +581,7 @@ run_extraction() {
     docker run -d \
         --platform "linux/${arch}" \
         --name "$container_name" \
+        --env "UOS_INSTALLER_URL=${installer_url}" \
         --privileged \
         --cgroupns=host \
         --tmpfs /run:exec \
@@ -612,7 +727,7 @@ run_extraction() {
     docker rm -f "$container_name" >/dev/null 2>&1 || true
     remove_from_cleanup "$container_name"
 
-    printf '%s\n' "${output_dir}/uosserver.tar"
+    printf -v "$__out" '%s' "${output_dir}/uosserver.tar"
 }
 
 #######################################
@@ -622,6 +737,7 @@ run_extraction() {
 load_extracted_image() {
     local arch="$1"
     local tar_path="$2"
+    local __out="$3"
     local target_tag="uosserver:${VERSION}-${arch}"
 
     log "Phase 3: Loading extracted image into Docker"
@@ -675,7 +791,7 @@ load_extracted_image() {
     image_size=$(docker image inspect --format '{{.Size}}' "$target_tag" 2>/dev/null || echo "0")
     log "Loaded image: $target_tag ($((image_size / 1024 / 1024))MB)"
 
-    printf '%s\n' "$target_tag"
+    printf -v "$__out" '%s' "$target_tag"
 }
 
 #######################################
@@ -685,7 +801,11 @@ load_extracted_image() {
 build_runtime_image() {
     local arch="$1"
     local uosserver_tag="$2"
+    local __out="$3"
     local final_tag="${IMAGE_NAME}:${VERSION}-${arch}"
+
+    [[ -n "$uosserver_tag" ]] || fatal "UOSSERVER_IMAGE must be set"
+    [[ -n "$VERSION" && "$VERSION" != "dev" ]] || fatal "APP_VERSION must be a real release version"
 
     log "Phase 4: Building runtime image for linux/${arch}"
 
@@ -710,7 +830,7 @@ build_runtime_image() {
     log "Built runtime image: $final_tag ($((image_size / 1024 / 1024))MB)"
 
     arch_image_tags+=("$final_tag")
-    printf '%s\n' "$final_tag"
+    printf -v "$__out" '%s' "$final_tag"
 }
 
 tag_local_aliases() {
@@ -737,6 +857,7 @@ tag_local_aliases() {
 validate_runtime_image() {
     local arch="$1"
     local image_tag="$2"
+    local __out="$3"
     local container_name="uos-validate-${arch}-$$"
     local validation_result="passed"
 
@@ -829,7 +950,8 @@ validate_runtime_image() {
     done
 
     if [[ "$services_ok" != "true" ]]; then
-        validation_result="degraded"
+        preserve_failure "$container_name" "$arch" "validation" "Critical service check failed"
+        fatal "Validation failed: one or more critical services are inactive"
     fi
 
     # --- Check 3: Verify listening ports ---
@@ -848,7 +970,8 @@ validate_runtime_image() {
     done
 
     if [[ "$ports_ok" != "true" ]]; then
-        validation_result="degraded"
+        preserve_failure "$container_name" "$arch" "validation" "Expected port check failed"
+        fatal "Validation failed: one or more expected ports are not listening"
     fi
 
     # --- Check 4: Restart test ---
@@ -895,7 +1018,7 @@ validate_runtime_image() {
     log "Validation complete (result: $validation_result)"
     
     # Return validation result for provenance
-    printf '%s\n' "$validation_result"
+    printf -v "$__out" '%s' "$validation_result"
 }
 
 #######################################
@@ -978,23 +1101,22 @@ build_arch_image() {
     local output_dir="${BUILD_ARTIFACTS_DIR}/extract-${arch}"
 
     # Phase 1: Build extractor
-    # Note: fatal() in subshell only exits subshell, so we check exit status
-    extractor_tag=$(build_extractor_image "$arch" "$installer_url") || {
+    build_extractor_image "$arch" "$installer_url" extractor_tag || {
         fatal "Phase 1 (build extractor) failed for ${arch}"
     }
 
     # Phase 2: Run extraction
-    uosserver_tar=$(run_extraction "$arch" "$extractor_tag") || {
+    run_extraction "$arch" "$extractor_tag" uosserver_tar || {
         fatal "Phase 2 (run extraction) failed for ${arch}"
     }
 
     # Phase 3: Load image
-    uosserver_tag=$(load_extracted_image "$arch" "$uosserver_tar") || {
+    load_extracted_image "$arch" "$uosserver_tar" uosserver_tag || {
         fatal "Phase 3 (load image) failed for ${arch}"
     }
 
     # Phase 4: Build runtime
-    final_tag=$(build_runtime_image "$arch" "$uosserver_tag") || {
+    build_runtime_image "$arch" "$uosserver_tag" final_tag || {
         fatal "Phase 4 (build runtime) failed for ${arch}"
     }
 
@@ -1005,7 +1127,7 @@ build_arch_image() {
     # Phase 5: Validate (optional)
     local validation_result="skipped"
     if [[ "${SKIP_VALIDATION:-false}" != "true" ]]; then
-        validation_result=$(validate_runtime_image "$arch" "$final_tag") || {
+        validate_runtime_image "$arch" "$final_tag" validation_result || {
             fatal "Phase 5 (validation) failed for ${arch}"
         }
     else
@@ -1056,8 +1178,10 @@ publish_manifests() {
     fi
 
     log "Creating multi-arch manifest for ${#arch_image_tags[@]} images"
-    docker manifest create "${IMAGE_NAME}:${VERSION}" "${arch_image_tags[@]}" --amend || true
-    docker manifest create "${IMAGE_NAME}:latest" "${arch_image_tags[@]}" --amend || true
+    docker manifest rm "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1 || true
+    docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
+    docker manifest create "${IMAGE_NAME}:${VERSION}" "${arch_image_tags[@]}"
+    docker manifest create "${IMAGE_NAME}:latest" "${arch_image_tags[@]}"
     docker manifest push "${IMAGE_NAME}:${VERSION}"
     docker manifest push "${IMAGE_NAME}:latest"
 }

@@ -2,7 +2,7 @@ name: Check for UniFi OS Server Updates
 
 on:
   schedule:
-    # Run daily at 06:00 UTC
+    # Run daily at 06:07 UTC
     - cron: '7 6 * * *'
   workflow_dispatch:
     inputs:
@@ -18,7 +18,9 @@ on:
 env:
   # Ubiquiti Download API - no browser needed!
   DOWNLOAD_API_URL: "https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server"
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
 
 # Prevent multiple concurrent runs - only one update check at a time
 concurrency:
@@ -41,6 +43,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Get current version from git tags
         id: current
@@ -55,40 +58,80 @@ jobs:
 
       - name: Fetch latest version from Ubiquiti API
         id: latest
+        shell: bash
         run: |
+          set -Eeuo pipefail
+
+          write_output() {
+            local key="$1"
+            local value="$2"
+
+            if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+              echo "::error::Invalid multiline output for $key"
+              exit 1
+            fi
+
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
+          }
+
           echo "Fetching from $DOWNLOAD_API_URL"
-          
-          # Fetch the API response
-          RESPONSE=$(curl -sL "$DOWNLOAD_API_URL")
-          
-          if [[ -z "$RESPONSE" ]]; then
-            echo "Failed to fetch from API"
-            echo "version=" >> $GITHUB_OUTPUT
-            echo "url_x64=" >> $GITHUB_OUTPUT
-            echo "url_arm64=" >> $GITHUB_OUTPUT
-            exit 0
+
+          RESPONSE=$(curl --fail --silent --show-error --location \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --retry 3 \
+            --retry-all-errors \
+            "$DOWNLOAD_API_URL")
+
+          jq -e '.downloads | type == "array"' >/dev/null <<< "$RESPONSE"
+
+          LATEST_ROW=$(
+            jq -r '
+              .downloads
+              | map(select(.name | test("Linux.*(x64|arm64)"; "i")))
+              | sort_by(.version)
+              | group_by(.version)
+              | map({
+                  version: .[0].version,
+                  x64: (map(select(.name | test("Linux.*x64"; "i")))[0].file_url // ""),
+                  arm64: (map(select(.name | test("Linux.*arm64"; "i")))[0].file_url // "")
+                })
+              | map(select(.x64 != "" and .arm64 != ""))
+              | .[]
+              | [.version, .x64, .arm64]
+              | @tsv
+            ' <<< "$RESPONSE" | sort -t $'\t' -k1,1V | tail -1
+          )
+
+          if [[ -z "$LATEST_ROW" ]]; then
+            echo "::error::No complete x64/arm64 Linux release found"
+            exit 1
           fi
-          
-          # Extract latest Linux x64 URL
-          URL_X64=$(echo "$RESPONSE" | jq -r '[.downloads[] | select(.name | test("Linux.*x64"; "i"))] | sort_by(.version) | reverse | .[0].file_url // empty')
-          
-          # Extract latest Linux arm64 URL
-          URL_ARM64=$(echo "$RESPONSE" | jq -r '[.downloads[] | select(.name | test("Linux.*arm64"; "i"))] | sort_by(.version) | reverse | .[0].file_url // empty')
-          
-          # Extract version from x64 URL
-          if [[ -n "$URL_X64" ]]; then
-            VERSION=$(echo "$URL_X64" | grep -oP '\d+\.\d+\.\d+' | head -1)
-          else
-            VERSION=""
-          fi
-          
+
+          IFS=$'\t' read -r VERSION URL_X64 URL_ARM64 <<< "$LATEST_ROW"
+
+          [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]] || {
+            echo "::error::Invalid version: $VERSION"
+            exit 1
+          }
+
+          [[ "$URL_X64" =~ ^https://[^[:space:]]+$ ]] || {
+            echo "::error::Invalid x64 URL"
+            exit 1
+          }
+
+          [[ "$URL_ARM64" =~ ^https://[^[:space:]]+$ ]] || {
+            echo "::error::Invalid arm64 URL"
+            exit 1
+          }
+
           echo "Found version: $VERSION"
           echo "Found x64 URL: $URL_X64"
           echo "Found arm64 URL: $URL_ARM64"
-          
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "url_x64=$URL_X64" >> $GITHUB_OUTPUT
-          echo "url_arm64=$URL_ARM64" >> $GITHUB_OUTPUT
+
+          write_output version "$VERSION"
+          write_output url_x64 "$URL_X64"
+          write_output url_arm64 "$URL_ARM64"
 
       - name: Compare versions
         id: check
@@ -107,15 +150,18 @@ jobs:
           echo "latest_version=$LATEST" >> $GITHUB_OUTPUT
           echo "url_x64=$URL_X64" >> $GITHUB_OUTPUT
           echo "url_arm64=$URL_ARM64" >> $GITHUB_OUTPUT
+
+          if [[ -z "$LATEST" || -z "$URL_X64" || -z "$URL_ARM64" ]]; then
+            echo "::error::Could not determine complete latest release metadata"
+            echo "new_version_available=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
           
           if [[ "$FORCE" == "true" ]]; then
             echo "Force build requested"
             echo "new_version_available=true" >> $GITHUB_OUTPUT
-          elif [[ -z "$LATEST" ]]; then
-            echo "Could not determine latest version"
-            echo "new_version_available=false" >> $GITHUB_OUTPUT
           elif [[ "$CURRENT" != "$LATEST" ]]; then
-            NEWER=$(printf '%s\n%s' "$CURRENT" "$LATEST" | sort -V | tail -1)
+            NEWER=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)
             if [[ "$NEWER" == "$LATEST" && "$NEWER" != "$CURRENT" ]]; then
               echo "New version available: $LATEST (current: $CURRENT)"
               echo "new_version_available=true" >> $GITHUB_OUTPUT
@@ -148,7 +194,7 @@ jobs:
     name: Trigger build for new version
     needs: check-version
     if: needs.check-version.outputs.new_version_available == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       actions: write
       contents: read
@@ -158,11 +204,13 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
+            const refName = context.ref.replace('refs/heads/', '');
+
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'docker-build.yml',
-              ref: 'main',
+              ref: refName,
               inputs: {
                 push: 'true',
                 platforms: 'linux/amd64,linux/arm64'  // Native runners for both platforms

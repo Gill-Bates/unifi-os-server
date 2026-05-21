@@ -4,18 +4,45 @@
 # while it lays down unit files in the image filesystem.
 
 command="${1:-}"
-shift || true
+if [ -z "$command" ]; then
+    echo "systemctl stub: missing command" >&2
+    exit 1
+fi
+shift
+
+unit_symlink_exists() {
+    local unit_name="$1"
+    find /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system -type l -name "$unit_name" 2>/dev/null | grep -q .
+}
 
 case "$command" in
     daemon-reload|daemon-reexec|reset-failed)
         exit 0
         ;;
-    enable|disable|reenable|preset|mask|unmask|start|stop|restart|try-restart|reload)
+    enable|disable|reenable|preset|mask|unmask)
+        if [ -x /usr/bin/systemctl.real ]; then
+            exec /usr/bin/systemctl.real "$command" "$@"
+        fi
+        echo "systemctl stub: unsupported state-changing command without systemctl.real: $command" >&2
+        exit 1
+        ;;
+    start|stop|restart|try-restart|reload)
         exit 0
         ;;
     is-enabled)
-        printf 'enabled\n'
-        exit 0
+        unit="${1:-}"
+        if [ -z "$unit" ]; then
+            echo "systemctl stub: missing unit" >&2
+            exit 1
+        fi
+
+        if unit_symlink_exists "$unit"; then
+            printf 'enabled\n'
+            exit 0
+        fi
+
+        printf 'disabled\n'
+        exit 1
         ;;
     is-active)
         printf 'inactive\n'
@@ -28,6 +55,7 @@ case "$command" in
         if [ -x /usr/bin/systemctl.real ]; then
             exec /usr/bin/systemctl.real "$command" "$@"
         fi
-        exit 0
+        echo "systemctl stub: unsupported command: $command" >&2
+        exit 1
         ;;
 esac

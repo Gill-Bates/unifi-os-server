@@ -16,10 +16,27 @@ error() {
     exit 1
 }
 
+validate_installer_url() {
+    local url="$1"
+
+    case "$url" in
+        ""|*$'\n'*|*$'\r'*|*" "*)
+            error "Invalid UOS_INSTALLER_URL"
+            ;;
+        https://*.ui.com/*|https://ui.com/*|https://dl.ui.com/*)
+            ;;
+        *)
+            error "Unexpected installer URL host: $url"
+            ;;
+    esac
+}
+
 # Check required env var
 if [[ -z "$UOS_INSTALLER_URL" ]]; then
     error "UOS_INSTALLER_URL environment variable is required"
 fi
+
+validate_installer_url "$UOS_INSTALLER_URL"
 
 # Check output directory is mounted
 if [[ ! -d "$OUTPUT_DIR" ]]; then
@@ -29,7 +46,13 @@ fi
 # Download installer if not present
 if [[ ! -x "$INSTALLER_PATH" ]]; then
     log "Downloading installer from $UOS_INSTALLER_URL"
-    curl -fsSL -o "$INSTALLER_PATH" "$UOS_INSTALLER_URL"
+    curl --fail --silent --show-error --location \
+        --connect-timeout 10 \
+        --max-time 300 \
+        --retry 3 \
+        --retry-all-errors \
+        -o "$INSTALLER_PATH" \
+        "$UOS_INSTALLER_URL"
     chmod +x "$INSTALLER_PATH"
 fi
 
@@ -40,8 +63,11 @@ INSTALLER_PID=$!
 
 # Wait for installer process to complete
 log "Waiting for installer process (PID: $INSTALLER_PID) to complete..."
-wait $INSTALLER_PID || true
-log "Installer process finished"
+set +e
+wait "$INSTALLER_PID"
+installer_status=$?
+set -e
+log "Installer process finished with exit code: $installer_status"
 
 # Wait for any remaining podman processes (installer may spawn background jobs)
 log "Waiting for background podman processes..."
@@ -142,11 +168,6 @@ podman --root "$STORAGE_BASE" images 2>/dev/null || true
 IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -E '^(localhost/)?uosserver:' | head -1 || true)
 
 if [[ -z "$IMAGE_NAME" ]]; then
-    # Try without repository prefix
-    IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -v '<none>' | head -1 || true)
-fi
-
-if [[ -z "$IMAGE_NAME" ]]; then
     log "Available images in storage:"
     podman --root "$STORAGE_BASE" images 2>/dev/null || true
     log "Storage directory contents:"
@@ -210,7 +231,6 @@ if ! echo "$ARCHIVE_FILES" | grep -qE '^(manifest\.json|repositories)$'; then
     log "WARNING: Archive missing manifest.json/repositories - attempting repair"
     
     TEMP_EXTRACT=$(mktemp -d)
-    trap "rm -rf '$TEMP_EXTRACT'" EXIT
     
     tar -xf "$OUTPUT_TAR" -C "$TEMP_EXTRACT"
     log "Extracted archive contents:"
@@ -239,8 +259,7 @@ if ! echo "$ARCHIVE_FILES" | grep -qE '^(manifest\.json|repositories)$'; then
             fi
         fi
     fi
-    
-    trap - EXIT
+
     rm -rf "$TEMP_EXTRACT"
 fi
 

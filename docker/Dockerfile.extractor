@@ -1,12 +1,8 @@
 # Extractor base image: provides the environment needed to run the Ubiquiti installer.
 # The installer is run in a privileged container from this image, not during build.
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
 
-ARG UOS_INSTALLER_URL
-ARG UOS_UID="1000"
-
-ENV DEBIAN_FRONTEND=noninteractive \
-	UOS_INSTALLER_URL=${UOS_INSTALLER_URL}
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install podman, skopeo and dependencies for the installer
 # skopeo is required for reliable OCI-to-Docker format conversion
@@ -41,13 +37,19 @@ RUN mkdir -p \
 
 # Stub loginctl to avoid installer spinning on user-status
 COPY --chmod=755 docker/loginctl-stub.sh /usr/local/bin/loginctl
-RUN mv /usr/bin/loginctl /usr/bin/loginctl.real 2>/dev/null || true \
-	&& ln -sf /usr/local/bin/loginctl /usr/bin/loginctl
+RUN test -x /usr/bin/loginctl \
+	&& mv /usr/bin/loginctl /usr/bin/loginctl.real \
+	&& ln -sf /usr/local/bin/loginctl /usr/bin/loginctl \
+	&& test -x /usr/bin/loginctl.real \
+	&& test -L /usr/bin/loginctl
 
 # Stub systemctl for non-systemd environment
 COPY --chmod=755 docker/systemctl-stub.sh /usr/local/bin/systemctl
-RUN mv /usr/bin/systemctl /usr/bin/systemctl.real 2>/dev/null || true \
-	&& ln -sf /usr/local/bin/systemctl /usr/bin/systemctl
+RUN test -x /usr/bin/systemctl \
+	&& mv /usr/bin/systemctl /usr/bin/systemctl.real \
+	&& ln -sf /usr/local/bin/systemctl /usr/bin/systemctl \
+	&& test -x /usr/bin/systemctl.real \
+	&& test -L /usr/bin/systemctl
 
 # Copy extraction script
 COPY --chmod=755 docker/extract-uosserver.sh /usr/local/bin/extract-uosserver.sh
