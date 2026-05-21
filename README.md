@@ -72,70 +72,82 @@ docker compose version
 
 ---
 
-## Build Flow
+## Technical Build Flow
+
+<details>
+<summary><strong>Build flow from <code>docker/build.sh</code></strong></summary>
+
+The build script loads configuration, resolves the official UniFi OS Server installer URLs, builds one image per requested architecture, validates the runtime image, and optionally publishes architecture images and multi-architecture manifests.
 
 ```mermaid
 flowchart TD
-    A["docker/build.sh"] --> B["Load configuration"]
-    B --> C["Resolve installer URLs"]
-    C --> D["Validate requested platforms"]
+  A["docker/build.sh"] --> B["Load configuration"]
+  B --> C["Resolve installer URLs"]
+  C --> D["Validate requested platforms"]
 
-    D --> E["For each platform<br/>amd64 / arm64"]
+  D --> E["For each platform<br/>amd64 / arm64"]
 
-    subgraph ARCH_BUILD["Per-architecture build"]
-        E --> F["1. Build extractor image"]
-        F --> G["2. Run extractor container"]
-        G --> H["Run official Ubiquiti installer"]
-        H --> I["Installer imports internal<br/>uosserver image into Podman"]
-        I --> J["Export /output/uosserver.tar"]
-        J --> K["3. Load extracted image into Docker"]
-        K --> L["Tag uosserver:&lt;version&gt;-&lt;arch&gt;"]
-        L --> M["4. Build runtime image"]
-        M --> N["Final image<br/>&lt;image&gt;:&lt;version&gt;-&lt;arch&gt;"]
-        N --> O["5. Validate runtime image"]
-        O --> P["Write provenance metadata"]
-    end
+  subgraph ARCH_BUILD["Per-architecture build"]
+    E --> F["1. Build extractor image"]
+    F --> G["2. Run extractor container"]
+    G --> H["Run official Ubiquiti installer"]
+    H --> I["Installer imports internal<br/>uosserver image into Podman"]
+    I --> J["Export /output/uosserver.tar"]
+    J --> K["3. Load extracted image into Docker"]
+    K --> L["Tag uosserver:&lt;version&gt;-&lt;arch&gt;"]
+    L --> M["4. Build runtime image"]
+    M --> N["Final image<br/>&lt;image&gt;:&lt;version&gt;-&lt;arch&gt;"]
+    N --> O["5. Validate runtime image"]
+    O --> P["Write provenance metadata"]
+  end
 
-    P --> Q{"PUSH=true?"}
-    Q -- "No" --> R["Keep local images only"]
-    Q -- "Yes" --> S["Push architecture images"]
+  P --> Q{"PUSH=true?"}
+  Q -- "No" --> R["Keep local images only"]
+  Q -- "Yes" --> S["Push architecture images"]
 
-    S --> T{"Single arch or multi arch?"}
-    T -- "Single arch" --> U["Tag and push<br/>&lt;version&gt; and latest"]
-    T -- "Multi arch" --> V["Create and push Docker manifests<br/>&lt;version&gt; and latest"]
+  S --> T{"Single arch or multi arch?"}
+  T -- "Single arch" --> U["Tag and push<br/>&lt;version&gt; and latest"]
+  T -- "Multi arch" --> V["Create and push Docker manifests<br/>&lt;version&gt; and latest"]
 
-    R --> W["Build complete"]
-    U --> W
-    V --> W
+  R --> W["Build complete"]
+  U --> W
+  V --> W
 ```
 
-## Extraction Architecture
+</details>
+
+<details>
+<summary><strong>Extraction architecture</strong></summary>
+
+This view shows how the official Ubiquiti installer is executed inside the extractor container and how the internal <code>uosserver</code> image becomes the final runtime image.
 
 ```mermaid
 flowchart TB
-    subgraph HOST["Docker host / CI runner"]
-        A["docker/build.sh"] --> B["Dockerfile.extractor"]
-        B --> C["Extractor image"]
+  subgraph HOST["Docker host / CI runner"]
+    A["docker/build.sh"] --> B["Dockerfile.extractor"]
+    B --> C["Extractor image"]
 
-        subgraph EXTRACTOR["Extractor container"]
-            C --> D["Official UniFi OS Server installer"]
-            D --> E["Installer runs non-interactively"]
-            E --> F["Podman storage"]
-            F --> G["Internal uosserver image"]
-            G --> H["Exported archive<br/>/output/uosserver.tar"]
-        end
-
-        H --> I["docker load"]
-        I --> J["Extracted base image<br/>uosserver:&lt;version&gt;-&lt;arch&gt;"]
-
-        J --> K["Dockerfile.runtime"]
-        K --> L["Runtime image<br/>&lt;image&gt;:&lt;version&gt;-&lt;arch&gt;"]
-
-        L --> M["Runtime validation"]
-        M --> N["Push arch image"]
-        N --> O["Multi-arch manifest<br/>&lt;version&gt; and latest"]
+    subgraph EXTRACTOR["Extractor container"]
+      C --> D["Official UniFi OS Server installer"]
+      D --> E["Installer runs non-interactively"]
+      E --> F["Podman storage"]
+      F --> G["Internal uosserver image"]
+      G --> H["Exported archive<br/>/output/uosserver.tar"]
     end
+
+    H --> I["docker load"]
+    I --> J["Extracted base image<br/>uosserver:&lt;version&gt;-&lt;arch&gt;"]
+
+    J --> K["Dockerfile.runtime"]
+    K --> L["Runtime image<br/>&lt;image&gt;:&lt;version&gt;-&lt;arch&gt;"]
+
+    L --> M["Runtime validation"]
+    M --> N["Push arch image"]
+    N --> O["Multi-arch manifest<br/>&lt;version&gt; and latest"]
+  end
 ```
+
+</details>
 
 ## Quick Start
 
