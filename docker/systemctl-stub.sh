@@ -50,6 +50,11 @@ case "$command" in
         printf 'inactive\n'
         exit 0
         ;;
+    is-system-running)
+        # Return "running" to satisfy installer's systemd-ready check
+        printf 'running\n'
+        exit 0
+        ;;
     status|show|list-unit-files|list-units)
         exit 0
         ;;
