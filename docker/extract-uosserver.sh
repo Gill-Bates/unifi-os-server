@@ -86,17 +86,17 @@ wait $INSTALLER_PID || true
 log "Installer process finished"
 
 # Wait for any remaining podman processes (installer may spawn background jobs)
-# Typical builds take ~10 minutes; allow up to 15 minutes (180 × 5s = 900s)
+# Debug timeout: 5 minutes (60 × 5s = 300s)
 log "Waiting for background podman processes..."
 PODMAN_FINISHED=false
-for i in {1..180}; do
+for i in {1..60}; do
     PODMAN_PROCS=$(pgrep -c podman 2>/dev/null || echo "0")
     if (( PODMAN_PROCS == 0 )); then
         log "No more podman processes running"
         PODMAN_FINISHED=true
         break
     fi
-    log "Still $PODMAN_PROCS podman process(es) running, waiting... (${i}/180)"
+    log "Still $PODMAN_PROCS podman process(es) running, waiting... (${i}/60)"
     
     # Every 60s (12 iterations), show what podman is doing
     if (( i % 12 == 0 )); then
@@ -109,7 +109,7 @@ for i in {1..180}; do
 done
 
 if [[ "$PODMAN_FINISHED" != "true" ]]; then
-    log "ERROR: Podman processes still running after 15 minute timeout"
+    log "ERROR: Podman processes still running after 5 minute timeout"
     log "Active podman processes:"
     ps aux | grep -E '[p]odman' || true
     pstree -p || true
