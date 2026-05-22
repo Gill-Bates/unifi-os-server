@@ -211,18 +211,28 @@ preseed_postgres() {
         "unifi-identity-update:unifi-identity-update"
     )
     
+    local missing=0
     for config in "${db_configs[@]}"; do
         local dbname="${config%%:*}"
         local owner="${config##*:}"
         
-        # Create user if not exists (ignore errors)
+        # Create user if not exists (ignore "already exists" errors)
         runuser -u postgres -- "$pg_bin/psql" -c "CREATE USER \"$owner\";" 2>/dev/null || true
         
         # Create database if not exists
         if ! runuser -u postgres -- "$pg_bin/psql" -lqt | cut -d \| -f 1 | grep -qw "$dbname"; then
             if runuser -u postgres -- "$pg_bin/createdb" -O "$owner" "$dbname" 2>/dev/null; then
                 log_info "  Created database: $dbname (owner: $owner)"
+            else
+                log_error "  Failed to create database: $dbname"
+                missing=1
             fi
+        fi
+        
+        # Verify database exists after creation attempt
+        if ! runuser -u postgres -- "$pg_bin/psql" -lqt | cut -d \| -f 1 | grep -qw "$dbname"; then
+            log_error "  Database verification failed: $dbname does not exist"
+            missing=1
         fi
         
         # Grant privileges (idempotent)
@@ -232,18 +242,30 @@ preseed_postgres() {
     # Stop PostgreSQL - systemd will start it properly
     runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast 2>/dev/null || true
     
+    if [ "$missing" -ne 0 ]; then
+        log_error "PostgreSQL pre-seeding incomplete: one or more databases failed"
+        return 1
+    fi
+    
     local elapsed=$((SECONDS - start_time))
     log_info "PostgreSQL pre-seeding complete (${elapsed}s)"
 }
 
 # Preseed marker is versioned to allow re-seeding on image upgrades.
 # If new DBs are added to the list above, increment this version.
-PRESEED_MARKER_VERSION="1"
-PRESEED_MARKER="/data/.postgres_preseeded_v${PRESEED_MARKER_VERSION}"
+# Marker lives in pg_data so it stays in sync with actual PostgreSQL state.
+PRESEED_MARKER_VERSION="2"
+PG_DATA="/var/lib/postgresql/14/main"
+PRESEED_MARKER="${PG_DATA}/.uos_postgres_preseeded_v${PRESEED_MARKER_VERSION}"
+
+# Ensure pg_data exists before checking marker (handles first boot with empty volume)
+mkdir -p "$PG_DATA"
+chown postgres:postgres "$PG_DATA"
 
 if [ ! -f "$PRESEED_MARKER" ]; then
     if preseed_postgres; then
         touch "$PRESEED_MARKER"
+        chown postgres:postgres "$PRESEED_MARKER"
     else
         log_warn "PostgreSQL pre-seeding incomplete; marker not written"
     fi

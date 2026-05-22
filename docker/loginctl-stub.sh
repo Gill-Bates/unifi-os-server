@@ -41,7 +41,10 @@ case "$1" in
         user="${2:-}"
         require_user "$user"
         valid_user "$user"
-        uid=$(id -u "$user" 2>/dev/null || echo "1000")
+        if ! uid=$(id -u "$user" 2>/dev/null); then
+            echo "loginctl stub: user does not exist: $user" >&2
+            exit 1
+        fi
         printf '%s (%s)\n' "$user" "$uid"
         printf '           State: active\n'
         printf '            Unit: user-%s.slice\n' "$uid"

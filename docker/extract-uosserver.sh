@@ -2,7 +2,7 @@
 # Runs inside the extractor container to:
 # 1. Download and run the Ubiquiti installer (will fail at container start)
 # 2. Export the extracted uosserver image to /output/uosserver.tar
-set -e
+set -euo pipefail
 
 INSTALLER_PATH="/opt/uos/installer/uos-installer"
 OUTPUT_DIR="/output"
@@ -18,15 +18,34 @@ error() {
 
 validate_installer_url() {
     local url="$1"
+    local host
 
+    # Reject empty, multiline, or whitespace-containing URLs
     case "$url" in
         ""|*$'\n'*|*$'\r'*|*" "*)
             error "Invalid UOS_INSTALLER_URL"
             ;;
-        https://*.ui.com/*|https://ui.com/*|https://dl.ui.com/*|https://fw-download.ubnt.com/*)
+    esac
+
+    # Must start with https://
+    [[ "$url" =~ ^https:// ]] || error "UOS_INSTALLER_URL must use https://"
+
+    # Extract host from URL: strip scheme, then take everything before first /
+    host="${url#https://}"
+    host="${host%%/*}"
+    host="${host%%:*}"  # Remove port if present
+
+    # Validate host against allowlist (exact match or subdomain of ui.com)
+    case "$host" in
+        ui.com|dl.ui.com|fw-download.ubnt.com)
+            ;;
+        *.ui.com)
+            # Verify it's actually a subdomain, not a suffix match
+            [[ "$host" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.ui\.com$ ]] || \
+                error "Unexpected installer URL host: $host"
             ;;
         *)
-            error "Unexpected installer URL host: $url"
+            error "Unexpected installer URL host: $host"
             ;;
     esac
 }
@@ -72,7 +91,7 @@ log "Installer process finished with exit code: $installer_status"
 # Wait for any remaining podman processes (installer may spawn background jobs)
 log "Waiting for background podman processes..."
 for i in {1..30}; do
-    PODMAN_PROCS=$(pgrep -c podman 2>/dev/null || echo "0")
+    PODMAN_PROCS=$(pgrep -c podman 2>/dev/null) || PODMAN_PROCS=0
     if (( PODMAN_PROCS == 0 )); then
         log "No more podman processes running"
         break
@@ -251,11 +270,16 @@ if ! echo "$ARCHIVE_FILES" | grep -qE '^(manifest\.json|repositories)$'; then
                 printf '{\"%s\":{\"%s\":\"%s\"}}\n' "$REPO_NAME" "$TAG_NAME" "$LAYER_ID" > "$TEMP_EXTRACT/repositories"
                 log "Created repositories file"
                 
-                # Repack
-                rm -f "$OUTPUT_TAR"
-                tar -cf "$OUTPUT_TAR" -C "$TEMP_EXTRACT" .
-                TAR_SIZE_MB=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null | awk '{printf "%.0f", $1/1024/1024}')
-                log "Repacked archive: ${TAR_SIZE_MB}MB"
+                # Repack to temporary file first (preserve original on failure)
+                REPACKED_TAR="${OUTPUT_TAR}.repacked"
+                if tar -cf "$REPACKED_TAR" -C "$TEMP_EXTRACT" .; then
+                    mv -f "$REPACKED_TAR" "$OUTPUT_TAR"
+                    TAR_SIZE_MB=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null | awk '{printf "%.0f", $1/1024/1024}')
+                    log "Repacked archive: ${TAR_SIZE_MB}MB"
+                else
+                    rm -f "$REPACKED_TAR"
+                    log "WARNING: Repack failed, keeping original archive"
+                fi
             fi
         fi
     fi

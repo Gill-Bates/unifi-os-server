@@ -43,6 +43,14 @@ on:
         options:
           - 'true'
           - 'false'
+      allow_overwrite:
+        description: 'Allow overwriting existing Docker tags'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 env:
   REGISTRY: docker.io
@@ -61,6 +69,7 @@ jobs:
     if: github.event.inputs.platforms == 'linux/amd64' || github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
     outputs:
       version: ${{ steps.build.outputs.version }}
+      trivy_summary: ${{ steps.trivy_summary.outputs.summary }}
     permissions:
       contents: read
 
@@ -120,7 +129,8 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: '${{ env.IMAGE_NAME }}:${{ steps.build.outputs.version }}-amd64'
-          format: 'table'
+          format: 'json'
+          output: 'trivy-amd64.json'
           exit-code: ${{ github.event.inputs.enforce_trivy_gate == 'true' && '1' || '0' }}
           ignore-unfixed: true
           vuln-type: 'os,library'
@@ -128,11 +138,60 @@ jobs:
           timeout: '10m'
           trivyignores: '.trivyignore'
 
-      - name: Push amd64 image
+      - name: Generate Trivy summary (amd64)
+        id: trivy_summary
+        run: |
+          if [[ ! -f trivy-amd64.json ]]; then
+            echo "summary=Scan failed - no results" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-amd64.json 2>/dev/null || echo 0)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-amd64.json 2>/dev/null || echo 0)
+
+          if (( CRITICAL == 0 && HIGH == 0 )); then
+            SUMMARY="✅ No HIGH/CRITICAL vulnerabilities found"
+          else
+            SUMMARY="⚠️ ${CRITICAL} CRITICAL, ${HIGH} HIGH vulnerabilities"
+          fi
+
+          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+          echo "$SUMMARY"
+
+          # Also output table to logs for visibility
+          echo "### Trivy Scan Results (amd64)" >> "$GITHUB_STEP_SUMMARY"
+          if (( CRITICAL > 0 || HIGH > 0 )); then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | "\(.Severity)\t\(.VulnerabilityID)\t\(.PkgName)\t\(.InstalledVersion)"' trivy-amd64.json 2>/dev/null | head -20 >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check amd64 tag existence
         if: github.event.inputs.push != 'false'
+        id: check_amd64
+        run: |
+          VERSION="${{ steps.build.outputs.version }}"
+          TAG="${IMAGE_NAME}:${VERSION}-amd64"
+          if docker manifest inspect "$TAG" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG already exists in registry"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG does not exist yet"
+          fi
+
+      - name: Push amd64 image
+        if: github.event.inputs.push != 'false' && (steps.check_amd64.outputs.exists != 'true' || github.event.inputs.allow_overwrite == 'true')
         run: |
           VERSION="${{ steps.build.outputs.version }}"
           docker push "${IMAGE_NAME}:${VERSION}-amd64"
+
+      - name: Skip push (tag exists)
+        if: github.event.inputs.push != 'false' && steps.check_amd64.outputs.exists == 'true' && github.event.inputs.allow_overwrite != 'true'
+        run: |
+          echo "::warning::Skipping push: ${IMAGE_NAME}:${{ steps.build.outputs.version }}-amd64 already exists. Set allow_overwrite=true to force."
 
   build-arm64:
     name: Build arm64 image
@@ -140,6 +199,7 @@ jobs:
     if: github.event.inputs.platforms == 'linux/arm64' || github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
     outputs:
       version: ${{ steps.build.outputs.version }}
+      trivy_summary: ${{ steps.trivy_summary.outputs.summary }}
     permissions:
       contents: read
 
@@ -200,7 +260,8 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: '${{ env.IMAGE_NAME }}:${{ steps.build.outputs.version }}-arm64'
-          format: 'table'
+          format: 'json'
+          output: 'trivy-arm64.json'
           exit-code: ${{ github.event.inputs.enforce_trivy_gate == 'true' && '1' || '0' }}
           ignore-unfixed: true
           vuln-type: 'os,library'
@@ -208,11 +269,60 @@ jobs:
           timeout: '10m'
           trivyignores: '.trivyignore'
 
-      - name: Push arm64 image
+      - name: Generate Trivy summary (arm64)
+        id: trivy_summary
+        run: |
+          if [[ ! -f trivy-arm64.json ]]; then
+            echo "summary=Scan failed - no results" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' trivy-arm64.json 2>/dev/null || echo 0)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' trivy-arm64.json 2>/dev/null || echo 0)
+
+          if (( CRITICAL == 0 && HIGH == 0 )); then
+            SUMMARY="✅ No HIGH/CRITICAL vulnerabilities found"
+          else
+            SUMMARY="⚠️ ${CRITICAL} CRITICAL, ${HIGH} HIGH vulnerabilities"
+          fi
+
+          echo "summary=$SUMMARY" >> "$GITHUB_OUTPUT"
+          echo "$SUMMARY"
+
+          # Also output table to logs for visibility
+          echo "### Trivy Scan Results (arm64)" >> "$GITHUB_STEP_SUMMARY"
+          if (( CRITICAL > 0 || HIGH > 0 )); then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | "\(.Severity)\t\(.VulnerabilityID)\t\(.PkgName)\t\(.InstalledVersion)"' trivy-arm64.json 2>/dev/null | head -20 >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check arm64 tag existence
         if: github.event.inputs.push != 'false'
+        id: check_arm64
+        run: |
+          VERSION="${{ steps.build.outputs.version }}"
+          TAG="${IMAGE_NAME}:${VERSION}-arm64"
+          if docker manifest inspect "$TAG" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG already exists in registry"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag $TAG does not exist yet"
+          fi
+
+      - name: Push arm64 image
+        if: github.event.inputs.push != 'false' && (steps.check_arm64.outputs.exists != 'true' || github.event.inputs.allow_overwrite == 'true')
         run: |
           VERSION="${{ steps.build.outputs.version }}"
           docker push "${IMAGE_NAME}:${VERSION}-arm64"
+
+      - name: Skip push (tag exists)
+        if: github.event.inputs.push != 'false' && steps.check_arm64.outputs.exists == 'true' && github.event.inputs.allow_overwrite != 'true'
+        run: |
+          echo "::warning::Skipping push: ${IMAGE_NAME}:${{ steps.build.outputs.version }}-arm64 already exists. Set allow_overwrite=true to force."
 
   create-manifest:
     name: Create multi-arch manifest
@@ -230,7 +340,21 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Check manifest tag existence
+        id: check_manifest
+        run: |
+          VERSION="${{ needs.build-amd64.outputs.version }}"
+          TAG="${IMAGE_NAME}:${VERSION}"
+          if docker manifest inspect "$TAG" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Manifest tag $TAG already exists in registry"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Manifest tag $TAG does not exist yet"
+          fi
+
       - name: Create and push manifest
+        if: steps.check_manifest.outputs.exists != 'true' || github.event.inputs.allow_overwrite == 'true'
         run: |
           AMD_VERSION="${{ needs.build-amd64.outputs.version }}"
           ARM_VERSION="${{ needs.build-arm64.outputs.version }}"
@@ -274,10 +398,15 @@ jobs:
           echo "  ${IMAGE_NAME}:${VERSION}"
           echo "  ${IMAGE_NAME}:latest"
 
+      - name: Skip manifest (tag exists)
+        if: steps.check_manifest.outputs.exists == 'true' && github.event.inputs.allow_overwrite != 'true'
+        run: |
+          echo "::warning::Skipping manifest push: ${IMAGE_NAME}:${{ needs.build-amd64.outputs.version }} already exists. Set allow_overwrite=true to force."
+
   create-release:
     name: Create GitHub Release
-    needs: [build-amd64, create-manifest]
-    if: needs.create-manifest.result == 'success' && github.event.inputs.push != 'false'
+    needs: [build-amd64, build-arm64, create-manifest]
+    if: always() && needs.create-manifest.result == 'success' && github.event.inputs.push != 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -288,6 +417,8 @@ jobs:
         with:
           script: |
             const version = '${{ needs.build-amd64.outputs.version }}';
+            const trivyAmd64 = '${{ needs.build-amd64.outputs.trivy_summary }}' || 'Scan not available';
+            const trivyArm64 = '${{ needs.build-arm64.outputs.trivy_summary }}' || 'Scan not available';
             const imageName = 'giiibates/unifi-os-server';
             const downloadApiUrl = 'https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server';
             const defaultReleaseNotesUrl = `https://community.ui.com/releases/r/uosserver/${version}`;
@@ -487,6 +618,15 @@ jobs:
               '- `' + imageName + ':' + version + '-amd64`',
               '- `' + imageName + ':' + version + '-arm64`',
               '- `' + imageName + ':latest`',
+              '',
+              '### Security Scan Results',
+              '',
+              '| Architecture | Status |',
+              '|--------------|--------|',
+              '| amd64 | ' + trivyAmd64 + ' |',
+              '| arm64 | ' + trivyArm64 + ' |',
+              '',
+              '> Scanned with [Trivy](https://trivy.dev/) for HIGH and CRITICAL severity vulnerabilities (unfixed CVEs ignored).',
               '',
               ...releaseNotesLines,
               '**Source:** [Ubiquiti Downloads](https://ui.com/download/software/unifi-os-server)'

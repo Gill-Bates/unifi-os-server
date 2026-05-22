@@ -46,7 +46,7 @@ case "$command" in
         ;;
     is-active)
         printf 'inactive\n'
-        exit 0
+        exit 3
         ;;
     status|show|list-unit-files|list-units)
         exit 0
