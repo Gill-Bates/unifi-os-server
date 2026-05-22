@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       new_version_available: ${{ steps.check.outputs.new_version_available }}
+      api_available: ${{ steps.check.outputs.api_available }}
       current_version: ${{ steps.check.outputs.current_version }}
       latest_version: ${{ steps.check.outputs.latest_version }}
       url_x64: ${{ steps.check.outputs.url_x64 }}
@@ -40,7 +41,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -76,14 +77,28 @@ jobs:
 
           echo "Fetching from $DOWNLOAD_API_URL"
 
-          RESPONSE=$(curl --fail --silent --show-error --location \
+          if ! RESPONSE=$(curl --fail --silent --show-error --location \
             --connect-timeout 10 \
             --max-time 30 \
             --retry 3 \
             --retry-all-errors \
-            "$DOWNLOAD_API_URL")
+            "$DOWNLOAD_API_URL"); then
+            echo "::warning::Ubiquiti API request failed (timeout/network/server). Skipping this run."
+            write_output api_available "false"
+            write_output version ""
+            write_output url_x64 ""
+            write_output url_arm64 ""
+            exit 0
+          fi
 
-          jq -e '.downloads | type == "array"' >/dev/null <<< "$RESPONSE"
+          if ! jq -e '.downloads | type == "array"' >/dev/null <<< "$RESPONSE"; then
+            echo "::warning::Unexpected Ubiquiti API response format. Skipping this run."
+            write_output api_available "false"
+            write_output version ""
+            write_output url_x64 ""
+            write_output url_arm64 ""
+            exit 0
+          fi
 
           LATEST_ROW=$(
             jq -r '
@@ -104,8 +119,12 @@ jobs:
           )
 
           if [[ -z "$LATEST_ROW" ]]; then
-            echo "::error::No complete x64/arm64 Linux release found"
-            exit 1
+            echo "::warning::No complete x64/arm64 Linux release found. Skipping this run."
+            write_output api_available "false"
+            write_output version ""
+            write_output url_x64 ""
+            write_output url_arm64 ""
+            exit 0
           fi
 
           IFS=$'\t' read -r VERSION URL_X64 URL_ARM64 <<< "$LATEST_ROW"
@@ -129,6 +148,7 @@ jobs:
           echo "Found x64 URL: $URL_X64"
           echo "Found arm64 URL: $URL_ARM64"
 
+          write_output api_available "true"
           write_output version "$VERSION"
           write_output url_x64 "$URL_X64"
           write_output url_arm64 "$URL_ARM64"
@@ -137,30 +157,42 @@ jobs:
         id: check
         run: |
           CURRENT="${{ steps.current.outputs.version }}"
+          API_AVAILABLE="${{ steps.latest.outputs.api_available }}"
           LATEST="${{ steps.latest.outputs.version }}"
           URL_X64="${{ steps.latest.outputs.url_x64 }}"
           URL_ARM64="${{ steps.latest.outputs.url_arm64 }}"
-          FORCE="${{ github.event.inputs.force_build }}"
+          FORCE="${{ github.event.inputs.force_build || 'false' }}"
           
+          echo "API metadata available: $API_AVAILABLE"
           echo "Current version: $CURRENT"
           echo "Latest version: $LATEST"
           echo "Force build: $FORCE"
           
+          echo "api_available=$API_AVAILABLE" >> $GITHUB_OUTPUT
           echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
           echo "latest_version=$LATEST" >> $GITHUB_OUTPUT
           echo "url_x64=$URL_X64" >> $GITHUB_OUTPUT
           echo "url_arm64=$URL_ARM64" >> $GITHUB_OUTPUT
 
-          if [[ -z "$LATEST" || -z "$URL_X64" || -z "$URL_ARM64" ]]; then
-            echo "::error::Could not determine complete latest release metadata"
-            echo "new_version_available=false" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          
           if [[ "$FORCE" == "true" ]]; then
             echo "Force build requested"
             echo "new_version_available=true" >> $GITHUB_OUTPUT
-          elif [[ "$CURRENT" != "$LATEST" ]]; then
+            exit 0
+          fi
+
+          if [[ "$API_AVAILABLE" != "true" ]]; then
+            echo "::warning::Skipping version comparison because Ubiquiti API metadata is unavailable"
+            echo "new_version_available=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [[ -z "$LATEST" || -z "$URL_X64" || -z "$URL_ARM64" ]]; then
+            echo "::warning::Could not determine complete latest release metadata"
+            echo "new_version_available=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [[ "$CURRENT" != "$LATEST" ]]; then
             NEWER=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)
             if [[ "$NEWER" == "$LATEST" && "$NEWER" != "$CURRENT" ]]; then
               echo "New version available: $LATEST (current: $CURRENT)"
@@ -180,9 +212,16 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| API Metadata Available | ${{ steps.check.outputs.api_available }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Current Version | ${{ steps.check.outputs.current_version }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Latest Version | ${{ steps.check.outputs.latest_version }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Update Available | ${{ steps.check.outputs.new_version_available }} |" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ steps.check.outputs.api_available }}" != "true" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "API request to Ubiquiti timed out or failed. This run was skipped safely." >> $GITHUB_STEP_SUMMARY
+          fi
+
           if [[ "${{ steps.check.outputs.new_version_available }}" == "true" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### Download URLs" >> $GITHUB_STEP_SUMMARY
@@ -201,7 +240,7 @@ jobs:
 
     steps:
       - name: Trigger build workflow
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const refName = context.ref.replace('refs/heads/', '');
@@ -213,7 +252,11 @@ jobs:
               ref: refName,
               inputs: {
                 push: 'true',
-                platforms: 'linux/amd64,linux/arm64'  // Native runners for both platforms
+                platforms: 'linux/amd64,linux/arm64',
+                version: '${{ needs.check-version.outputs.latest_version }}',
+                url_x64: '${{ needs.check-version.outputs.url_x64 }}',
+                url_arm64: '${{ needs.check-version.outputs.url_arm64 }}',
+                enforce_trivy_gate: 'false'  // Keep current non-blocking default for upstream CVEs
               }
             });
             console.log('Triggered build workflow for amd64 + arm64');

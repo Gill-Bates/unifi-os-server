@@ -20,6 +20,29 @@ on:
           - 'linux/amd64'
           - 'linux/arm64'
           - 'linux/amd64,linux/arm64'
+      version:
+        description: 'Pinned UniFi OS version (optional)'
+        required: false
+        default: ''
+        type: string
+      url_x64:
+        description: 'Pinned Linux x64 installer URL (optional)'
+        required: false
+        default: ''
+        type: string
+      url_arm64:
+        description: 'Pinned Linux arm64 installer URL (optional)'
+        required: false
+        default: ''
+        type: string
+      enforce_trivy_gate:
+        description: 'Fail build on HIGH/CRITICAL Trivy findings'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 env:
   REGISTRY: docker.io
@@ -35,6 +58,7 @@ jobs:
   build-amd64:
     name: Build amd64 image
     runs-on: ubuntu-24.04
+    if: github.event.inputs.platforms == 'linux/amd64' || github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
     outputs:
       version: ${{ steps.build.outputs.version }}
     permissions:
@@ -42,18 +66,17 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
         with:
           driver-opts: |
-            image=moby/buildkit:latest
             network=host
 
       - name: Log in to Docker Hub
         if: github.event.inputs.push != 'false'
-        uses: docker/login-action@v4
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -65,19 +88,40 @@ jobs:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
           PUSH: 'false'
           PLATFORMS: linux/amd64
+          VERSION: ${{ github.event.inputs.version }}
+          UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
+          UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
         run: |
           bash ./docker/build.sh
-          # Extract version from built image
-          VERSION=$(docker images --format '{{.Tag}}' "$IMAGE_NAME" | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "latest")
+
+          VERSION="$(
+            docker images --format '{{.Tag}}' "$IMAGE_NAME" \
+              | sed -nE 's/^([0-9]+(\.[0-9]+){2,3})(-(amd64|arm64))?$/\1/p' \
+              | sort -V \
+              | tail -1
+          )"
+
+          if [[ -z "${VERSION:-}" ]]; then
+            echo "Failed to resolve built image version from local tags" >&2
+            docker images "$IMAGE_NAME" >&2 || true
+            exit 1
+          fi
+
+          EXPECTED_VERSION="${{ github.event.inputs.version }}"
+          if [[ -n "$EXPECTED_VERSION" && "$VERSION" != "$EXPECTED_VERSION" ]]; then
+            echo "Resolved image version ($VERSION) does not match requested version ($EXPECTED_VERSION)" >&2
+            exit 1
+          fi
+
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Built version: ${VERSION}"
 
       - name: Trivy vulnerability scan (amd64)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: '${{ env.IMAGE_NAME }}:${{ steps.build.outputs.version }}-amd64'
           format: 'table'
-          exit-code: '0'  # Warning only - upstream Ubiquiti dependencies cannot be fixed
+          exit-code: ${{ github.event.inputs.enforce_trivy_gate == 'true' && '1' || '0' }}
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
@@ -94,25 +138,26 @@ jobs:
     name: Build arm64 image
     runs-on: ubuntu-24.04-arm  # Native arm64 runner - no QEMU emulation needed
     if: github.event.inputs.platforms == 'linux/arm64' || github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
+    outputs:
+      version: ${{ steps.build.outputs.version }}
     permissions:
       contents: read
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       # No QEMU needed - running natively on arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
         with:
           driver-opts: |
-            image=moby/buildkit:latest
             network=host
 
       - name: Log in to Docker Hub
         if: github.event.inputs.push != 'false'
-        uses: docker/login-action@v4
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -124,17 +169,39 @@ jobs:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
           PUSH: 'false'
           PLATFORMS: linux/arm64
+          VERSION: ${{ github.event.inputs.version }}
+          UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
+          UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
         run: |
           bash ./docker/build.sh
-          VERSION=$(docker images --format '{{.Tag}}' "$IMAGE_NAME" | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "latest")
+
+          VERSION="$(
+            docker images --format '{{.Tag}}' "$IMAGE_NAME" \
+              | sed -nE 's/^([0-9]+(\.[0-9]+){2,3})(-(amd64|arm64))?$/\1/p' \
+              | sort -V \
+              | tail -1
+          )"
+
+          if [[ -z "${VERSION:-}" ]]; then
+            echo "Failed to resolve built image version from local tags" >&2
+            docker images "$IMAGE_NAME" >&2 || true
+            exit 1
+          fi
+
+          EXPECTED_VERSION="${{ github.event.inputs.version }}"
+          if [[ -n "$EXPECTED_VERSION" && "$VERSION" != "$EXPECTED_VERSION" ]]; then
+            echo "Resolved image version ($VERSION) does not match requested version ($EXPECTED_VERSION)" >&2
+            exit 1
+          fi
+
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Trivy vulnerability scan (arm64)
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: '${{ env.IMAGE_NAME }}:${{ steps.build.outputs.version }}-arm64'
           format: 'table'
-          exit-code: '0'  # Warning only - upstream Ubiquiti dependencies cannot be fixed
+          exit-code: ${{ github.event.inputs.enforce_trivy_gate == 'true' && '1' || '0' }}
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
@@ -157,7 +224,7 @@ jobs:
 
     steps:
       - name: Log in to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -165,7 +232,19 @@ jobs:
 
       - name: Create and push manifest
         run: |
-          VERSION="${{ needs.build-amd64.outputs.version }}"
+          AMD_VERSION="${{ needs.build-amd64.outputs.version }}"
+          ARM_VERSION="${{ needs.build-arm64.outputs.version }}"
+          VERSION="$AMD_VERSION"
+
+          if [[ -z "$AMD_VERSION" ]]; then
+            echo "Missing amd64 version output"
+            exit 1
+          fi
+
+          if [[ "${{ needs.build-arm64.result }}" == "success" && "$ARM_VERSION" != "$AMD_VERSION" ]]; then
+            echo "Version mismatch between architectures: amd64=$AMD_VERSION arm64=$ARM_VERSION"
+            exit 1
+          fi
           
           # Check which images are available
           IMAGES=""
@@ -205,13 +284,14 @@ jobs:
 
     steps:
       - name: Create or update GitHub Release
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const version = '${{ needs.build-amd64.outputs.version }}';
             const imageName = 'giiibates/unifi-os-server';
             const downloadApiUrl = 'https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server';
             const defaultReleaseNotesUrl = `https://community.ui.com/releases/r/uosserver/${version}`;
+            const externalTimeoutMs = 15000;
 
             function stripHtml(html = '') {
               return String(html)
@@ -253,7 +333,12 @@ jobs:
             }
 
             async function fetchJson(url, options = {}, contextLabel = 'request') {
-              const response = await fetch(url, options);
+              const fetchOptions = { ...options };
+              if (!fetchOptions.signal && typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+                fetchOptions.signal = AbortSignal.timeout(externalTimeoutMs);
+              }
+
+              const response = await fetch(url, fetchOptions);
               if (!response.ok) {
                 throw new Error(`${contextLabel} failed with ${response.status} ${response.statusText}`);
               }
@@ -431,6 +516,9 @@ jobs:
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   release_id: release.id,
+                  name: 'UniFi OS Server ' + version,
+                  draft: false,
+                  prerelease: false,
                   body: body
                 });
                 console.log('Updated release v' + version);

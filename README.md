@@ -149,6 +149,51 @@ flowchart TB
 
 </details>
 
+---
+
+## GitHub Actions Automation
+
+This repository includes two GitHub Actions workflows:
+
+- `check-updates.yml`
+- `docker-build.yml`
+
+### `check-updates.yml`
+
+- runs on schedule and manual dispatch
+- checks the official Ubiquiti download API for a new Linux x64/arm64 release pair
+- is resilient to temporary API outages/timeouts (skips safely instead of failing the whole workflow)
+- dispatches `docker-build.yml` with a pinned release version and pinned installer URLs
+
+### `docker-build.yml`
+
+Manual dispatch supports these inputs:
+
+- `push` (`true`/`false`)
+- `platforms` (`linux/amd64`, `linux/arm64`, or both)
+- `version` (optional, pinned UniFi OS version)
+- `url_x64` (optional, pinned x64 installer URL)
+- `url_arm64` (optional, pinned arm64 installer URL)
+- `enforce_trivy_gate` (`true`/`false`)
+
+Build safety rules:
+
+- build version extraction fails hard if no valid semantic version is found
+- amd64 and arm64 versions must match before publishing a multi-arch manifest
+- release metadata updates normalize `name`, `draft`, and `prerelease`
+
+Release notes behavior:
+
+- GitHub Releases include an "Official UniFi Release Notes" section
+- notes are fetched from Ubiquiti metadata + UniFi Community GraphQL data
+- external note fetch calls use explicit request timeouts
+
+Security scan behavior:
+
+- Trivy always runs for `HIGH` and `CRITICAL`
+- default mode is non-blocking (`enforce_trivy_gate=false`) due upstream vendor CVEs
+- set `enforce_trivy_gate=true` to make findings blocking
+
 ## Quick Start
 
 ### 1. Clone or enter the project directory
