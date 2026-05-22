@@ -129,8 +129,6 @@ log_success "Platform: $FIRMWARE_PLATFORM"
 # This is OPTIONAL - some setups don't have tap0 or macvlan support.
 if [ ! -d "/sys/devices/virtual/net/eth0" ] && [ -d "/sys/devices/virtual/net/tap0" ]; then
     if ip link add name eth0 link tap0 type macvlan 2>/dev/null; then
-if [ ! -d "/sys/devices/virtual/net/eth0" ] && [ -d "/sys/devices/virtual/net/tap0" ]; then
-    if ip link add name eth0 link tap0 type macvlan 2>/dev/null; then
         ip link set eth0 up || log_warn "Failed to bring up eth0 macvlan alias"
     else
         log_warn "macvlan setup failed (tap0 exists but macvlan unavailable), continuing without eth0 alias"
