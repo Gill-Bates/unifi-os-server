@@ -461,13 +461,16 @@ jobs:
             }
 
             function hasMeaningfulHtml(html = '') {
-              return stripHtml(html).length > 0;
+              // Strip HTML and normalize all whitespace (including &nbsp; → regular space)
+              const text = stripHtml(html).replace(/\s+/g, ' ').trim();
+              // Must have actual content (not just whitespace or empty)
+              return text.length > 0;
             }
 
             function renderTextSection(title, blocks) {
               const meaningful = (Array.isArray(blocks) ? blocks : [])
-                .filter((entry) => entry && entry.__typename === 'TextContent' && hasMeaningfulHtml(entry.content))
-                .map((entry) => entry.content.trim());
+                .map((entry) => entry && entry.__typename === 'TextContent' ? stripHtml(entry.content) : '')
+                .filter((text) => text.replace(/\s+/g, ' ').trim().length > 0);
 
               if (!meaningful.length) {
                 return [];
