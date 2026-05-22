@@ -131,8 +131,8 @@ STABLE_COUNT=0
 MAX_WAIT=300  # 5 minutes max
 
 for (( waited=0; waited < MAX_WAIT; waited+=5 )); do
-    # Check if uosserver image exists
-    IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -E '^(localhost/)?uosserver:' | head -1 || true)
+    # Check if uosserver image exists (matches all variants: uosserver:, localhost/uosserver:, docker.io/library/uosserver:)
+    IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -E '(^|/)uosserver:' | head -1 || true)
     
     if [[ -n "$IMAGE_NAME" ]]; then
         # Image found! Now wait for storage to stabilize
