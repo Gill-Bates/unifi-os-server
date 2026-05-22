@@ -176,6 +176,15 @@ jobs:
             echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Upload Trivy findings (amd64)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-findings-amd64
+          path: trivy-amd64.json
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Smoke test amd64 image
         run: |
           VERSION="${{ steps.build.outputs.version }}"
@@ -347,6 +356,15 @@ jobs:
             echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Upload Trivy findings (arm64)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-findings-arm64
+          path: trivy-arm64.json
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Smoke test arm64 image
         run: |
           VERSION="${{ steps.build.outputs.version }}"
@@ -489,6 +507,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
 
     steps:
       - name: Create or update GitHub Release
@@ -499,9 +518,42 @@ jobs:
             const trivyAmd64 = '${{ needs.build-amd64.outputs.trivy_summary }}' || 'Scan not available';
             const trivyArm64 = '${{ needs.build-arm64.outputs.trivy_summary }}' || 'Scan not available';
             const imageName = 'giiibates/unifi-os-server';
+            const runId = context.runId;
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
             const downloadApiUrl = 'https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server';
             const defaultReleaseNotesUrl = `https://community.ui.com/releases/r/uosserver/${version}`;
             const externalTimeoutMs = 15000;
+
+            async function resolveTrivyArtifactLinks() {
+              const findings = {
+                amd64: `${runUrl}#artifacts`,
+                arm64: `${runUrl}#artifacts`
+              };
+
+              try {
+                const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: runId,
+                  per_page: 100
+                });
+
+                const artifacts = data && Array.isArray(data.artifacts) ? data.artifacts : [];
+                const amd = artifacts.find((a) => a && a.name === 'trivy-findings-amd64');
+                const arm = artifacts.find((a) => a && a.name === 'trivy-findings-arm64');
+
+                if (amd && amd.id) {
+                  findings.amd64 = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}/artifacts/${amd.id}`;
+                }
+                if (arm && arm.id) {
+                  findings.arm64 = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}/artifacts/${arm.id}`;
+                }
+              } catch (e) {
+                console.warn(`Failed to resolve Trivy artifact links: ${e.message}`);
+              }
+
+              return findings;
+            }
 
             function stripHtml(html = '') {
               return String(html)
@@ -690,6 +742,8 @@ jobs:
               ];
             }
 
+            const findingsLinks = await resolveTrivyArtifactLinks();
+
             const body = [
               '## UniFi OS Server ' + version,
               '',
@@ -707,6 +761,11 @@ jobs:
               '|--------------|--------|',
               '| amd64 | ' + trivyAmd64 + ' |',
               '| arm64 | ' + trivyArm64 + ' |',
+              '',
+              'Findings:',
+              '- amd64: [trivy-findings-amd64](' + findingsLinks.amd64 + ')',
+              '- arm64: [trivy-findings-arm64](' + findingsLinks.arm64 + ')',
+              '- Full workflow run: [Actions Run](' + runUrl + ')',
               '',
               '> Scanned with [Trivy](https://trivy.dev/) for HIGH and CRITICAL severity vulnerabilities (unfixed CVEs ignored).',
               '',
