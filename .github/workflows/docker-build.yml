@@ -345,7 +345,7 @@ jobs:
   create-manifest:
     name: Create multi-arch manifest
     needs: [build-amd64, build-arm64]
-    if: always() && needs.build-amd64.result == 'success' && github.event.inputs.push != 'false'
+    if: always() && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' && github.event.inputs.push != 'false'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -424,7 +424,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     needs: [build-amd64, build-arm64, create-manifest]
-    if: always() && needs.create-manifest.result == 'success' && github.event.inputs.push != 'false'
+    if: always() && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' && needs.create-manifest.result == 'success' && github.event.inputs.push != 'false'
     runs-on: ubuntu-latest
     permissions:
       contents: write
