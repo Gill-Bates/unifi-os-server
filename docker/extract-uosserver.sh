@@ -85,48 +85,6 @@ log "Waiting for installer process (PID: $INSTALLER_PID) to complete..."
 wait $INSTALLER_PID || true
 log "Installer process finished"
 
-# Wait for any remaining podman processes (installer may spawn background jobs)
-# Debug timeout: 5 minutes (60 × 5s = 300s)
-log "Waiting for background podman processes..."
-PODMAN_FINISHED=false
-for i in {1..60}; do
-    PODMAN_PROCS=$(pgrep -c podman 2>/dev/null || echo "0")
-    if (( PODMAN_PROCS == 0 )); then
-        log "No more podman processes running"
-        PODMAN_FINISHED=true
-        break
-    fi
-    log "Still $PODMAN_PROCS podman process(es) running, waiting... (${i}/60)"
-    
-    # Every 60s (12 iterations), show what podman is doing
-    if (( i % 12 == 0 )); then
-        log "=== Podman diagnostic (iteration $i) ==="
-        ps aux | grep -E '[p]odman' | head -5 || true
-        df -h /home /var/lib 2>/dev/null | head -3 || true
-    fi
-    
-    sleep 5
-done
-
-if [[ "$PODMAN_FINISHED" != "true" ]]; then
-    log "ERROR: Podman processes still running after 5 minute timeout"
-    log "Active podman processes:"
-    ps aux | grep -E '[p]odman' || true
-    pstree -p || true
-    error "Timeout waiting for podman build to complete"
-fi
-
-# Additional settle time
-log "Waiting for filesystem to settle..."
-sleep 10
-
-# Log what podman did (if anything)
-log "Checking for podman activity..."
-if [[ -f /var/log/podman.log ]]; then
-    log "Podman log tail:"
-    tail -50 /var/log/podman.log || true
-fi
-
 # Find the uosserver storage directory
 # The installer creates a uosserver user and runs podman as that user
 STORAGE_PATHS=(
@@ -159,32 +117,33 @@ if [[ -z "$STORAGE_BASE" || ! -d "$STORAGE_BASE" ]]; then
     done
     log "Home directory contents:"
     ls -la /home/ 2>/dev/null || true
-    if [[ -d /home/uosserver ]]; then
-        ls -la /home/uosserver/ 2>/dev/null || true
-        ls -la /home/uosserver/.local/share/containers/ 2>/dev/null || true
-    fi
     error "Podman storage not found"
 fi
 
 log "Using podman storage: $STORAGE_BASE"
 
-# Wait for image to be fully written
-# Check that overlay-images has content and isn't still being written
-log "Waiting for image data to be complete..."
-MAX_WAIT=300
-WAITED=0
+# IMAGE-AWARE MONITORING: Poll for uosserver image instead of waiting for podman to exit
+# The installer may start a runtime container that hangs on systemd - we don't need to wait for it
+log "Polling for uosserver image (image-aware monitoring)..."
+IMAGE_FOUND=false
 PREV_SIZE=0
 STABLE_COUNT=0
-while (( WAITED < MAX_WAIT )); do
-    # Check total size of storage directory
-    STORAGE_SIZE=$(du -sm "$STORAGE_BASE" 2>/dev/null | cut -f1 || echo "0")
+MAX_WAIT=300  # 5 minutes max
+
+for (( waited=0; waited < MAX_WAIT; waited+=5 )); do
+    # Check if uosserver image exists
+    IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -E '^(localhost/)?uosserver:' | head -1 || true)
     
-    if (( STORAGE_SIZE > 1000 )); then
-        log "Storage size: ${STORAGE_SIZE}MB"
-        if (( STORAGE_SIZE == PREV_SIZE )); then
+    if [[ -n "$IMAGE_NAME" ]]; then
+        # Image found! Now wait for storage to stabilize
+        STORAGE_SIZE=$(du -sm "$STORAGE_BASE" 2>/dev/null | cut -f1 || echo "0")
+        log "Found image: $IMAGE_NAME (storage: ${STORAGE_SIZE}MB)"
+        
+        if (( STORAGE_SIZE > 1000 && STORAGE_SIZE == PREV_SIZE )); then
             STABLE_COUNT=$((STABLE_COUNT + 1))
             if (( STABLE_COUNT >= 3 )); then
-                log "Storage size stable at ${STORAGE_SIZE}MB for 15s"
+                log "Image found and storage stable at ${STORAGE_SIZE}MB"
+                IMAGE_FOUND=true
                 break
             fi
         else
@@ -192,38 +151,32 @@ while (( WAITED < MAX_WAIT )); do
         fi
         PREV_SIZE=$STORAGE_SIZE
     else
-        log "Storage size: ${STORAGE_SIZE}MB (waiting for >1000MB)..."
+        # Image not found yet - show progress
+        if (( waited % 30 == 0 )); then
+            log "Waiting for uosserver image... (${waited}s/${MAX_WAIT}s)"
+            podman --root "$STORAGE_BASE" images 2>/dev/null || true
+        fi
     fi
     
     sleep 5
-    WAITED=$((WAITED + 5))
 done
 
-if (( STORAGE_SIZE < 1000 )); then
-    log "WARNING: Storage size only ${STORAGE_SIZE}MB after ${MAX_WAIT}s wait"
-fi
-
-# Get the image name from podman
-log "Listing images in storage..."
-podman --root "$STORAGE_BASE" images 2>/dev/null || true
-
-IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -E '^(localhost/)?uosserver:' | head -1 || true)
-
-if [[ -z "$IMAGE_NAME" ]]; then
-    # Try without repository prefix
-    IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -v '<none>' | head -1 || true)
-fi
-
-if [[ -z "$IMAGE_NAME" ]]; then
-    log "Available images in storage:"
+if [[ "$IMAGE_FOUND" != "true" ]]; then
+    log "ERROR: uosserver image not found after ${MAX_WAIT}s"
+    log "Available images:"
     podman --root "$STORAGE_BASE" images 2>/dev/null || true
-    log "Storage directory contents:"
+    log "Active podman processes:"
+    ps aux | grep -E '[p]odman' || true
+    log "Storage contents:"
     ls -la "$STORAGE_BASE/" 2>/dev/null || true
-    ls -la "$STORAGE_BASE/overlay-images/" 2>/dev/null || true
-    error "No uosserver image found in podman storage"
+    error "Installer did not produce uosserver image"
 fi
 
-log "Found image: $IMAGE_NAME"
+# Stop any running containers before export (installer may have started runtime)
+log "Stopping any installer-started containers..."
+podman --root "$STORAGE_BASE" ps -q 2>/dev/null | xargs -r podman --root "$STORAGE_BASE" stop -t 5 2>/dev/null || true
+pkill -TERM -f 'podman.*run' 2>/dev/null || true
+sleep 3
 
 # Get image size to verify it's complete
 IMAGE_SIZE=$(podman --root "$STORAGE_BASE" images --format "{{.Size}}" "$IMAGE_NAME" 2>/dev/null || echo "unknown")
