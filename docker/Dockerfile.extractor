@@ -33,7 +33,8 @@ RUN mkdir -p \
 		/etc/containers \
 		/var/lib/containers/storage \
 		/var/lib/uosserver \
-		/var/lib/systemd/linger
+		/var/lib/systemd/linger \
+		/run/systemd/system
 
 # Stub loginctl to avoid installer spinning on user-status
 COPY --chmod=755 docker/loginctl-stub.sh /usr/local/bin/loginctl
