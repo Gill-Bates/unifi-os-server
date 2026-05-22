@@ -55,7 +55,6 @@ on:
 env:
   REGISTRY: docker.io
   IMAGE_NAME: giiibates/unifi-os-server
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # Prevent duplicate builds - queue new runs, don't cancel in-progress builds
 concurrency:
@@ -127,7 +126,7 @@ jobs:
 
       - name: Upload failure artifacts (amd64)
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: failure-artifacts-amd64
           path: /tmp/uos-build-*/failure-*
@@ -308,7 +307,7 @@ jobs:
 
       - name: Upload failure artifacts (arm64)
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: failure-artifacts-arm64
           path: /tmp/uos-build-*/failure-*
@@ -507,7 +506,7 @@ jobs:
     name: Create GitHub Release
     needs: [build-amd64, build-arm64, create-manifest]
     if: always() && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' && needs.create-manifest.result == 'success' && github.event.inputs.push != 'false'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
