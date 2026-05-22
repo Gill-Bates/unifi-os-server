@@ -182,6 +182,12 @@ Build safety rules:
 - amd64 and arm64 versions must match before publishing a multi-arch manifest
 - release metadata updates normalize `name`, `draft`, and `prerelease`
 
+Publishing behavior in GitHub Actions:
+
+- per-architecture jobs push `:<version>-amd64` and `:<version>-arm64`
+- `:<version>` and `:latest` are created only by the manifest job after both architectures succeed
+- if only one architecture is built in `docker-build.yml`, architecture tags are pushed, but no multi-arch `:<version>`/`:latest` tags are published
+
 Release notes behavior:
 
 - GitHub Releases include an "Official UniFi Release Notes" section
