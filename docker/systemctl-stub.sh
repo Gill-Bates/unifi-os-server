@@ -3,6 +3,9 @@
 # The upstream installer only needs service-management commands to succeed
 # while it lays down unit files in the image filesystem.
 
+# Debug logging
+echo "[systemctl-stub] Called with: $*" >> /tmp/systemctl-stub.log 2>/dev/null || true
+
 command="${1:-}"
 shift || true
 
@@ -23,6 +26,7 @@ case "$command" in
         ;;
     is-system-running)
         # Return "running" to satisfy installer's systemd-ready check
+        echo "[systemctl-stub] is-system-running called, returning 'running'" >> /tmp/systemctl-stub.log 2>/dev/null || true
         printf 'running\n'
         exit 0
         ;;
