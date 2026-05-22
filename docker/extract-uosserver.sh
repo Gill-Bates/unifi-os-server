@@ -229,13 +229,22 @@ log "Verifying tar archive format..."
 ARCHIVE_FILES=$(tar -tf "$OUTPUT_TAR" 2>/dev/null | head -20)
 echo "$ARCHIVE_FILES"
 
-# Check specifically for missing repositories file (Docker requires it)
-if ! echo "$ARCHIVE_FILES" | grep -q '^repositories$'; then
+# Check specifically for missing repositories file (Docker requires it on some versions)
+# Use full tar listing for this check, not just head -20
+if ! tar -tf "$OUTPUT_TAR" 2>/dev/null | grep -q '^repositories$'; then
     log "WARNING: Archive missing repositories file - attempting repair"
     
     TEMP_EXTRACT=$(mktemp -d)
+    trap "rm -rf '$TEMP_EXTRACT'" EXIT
     
-    tar -xf "$OUTPUT_TAR" -C "$TEMP_EXTRACT"
+    log "Extracting archive for repair (this may take a minute on arm64)..."
+    if ! tar -xf "$OUTPUT_TAR" -C "$TEMP_EXTRACT"; then
+        log "ERROR: Failed to extract archive for repair"
+        rm -rf "$TEMP_EXTRACT"
+        trap - EXIT
+        error "Archive extraction failed"
+    fi
+    
     log "Extracted archive contents:"
     ls -la "$TEMP_EXTRACT"
     
@@ -252,23 +261,34 @@ if ! echo "$ARCHIVE_FILES" | grep -q '^repositories$'; then
                 LAYER_ID="${CONFIG_FILE%.json}"
                 LAYER_ID="${LAYER_ID#sha256:}"
                 printf '{\"%s\":{\"%s\":\"%s\"}}\n' "$REPO_NAME" "$TAG_NAME" "$LAYER_ID" > "$TEMP_EXTRACT/repositories"
-                log "Created repositories file"
+                log "Created repositories file: $(cat "$TEMP_EXTRACT/repositories")"
                 
                 # Repack to temporary file first (preserve original on failure)
                 REPACKED_TAR="${OUTPUT_TAR}.repacked"
+                log "Repacking archive (this may take a minute on arm64)..."
                 if tar -cf "$REPACKED_TAR" -C "$TEMP_EXTRACT" .; then
+                    # Sync to ensure all writes are flushed before rename
+                    sync
                     mv -f "$REPACKED_TAR" "$OUTPUT_TAR"
+                    sync
                     TAR_SIZE_MB=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null | awk '{printf "%.0f", $1/1024/1024}')
                     log "Repacked archive: ${TAR_SIZE_MB}MB"
                 else
                     rm -f "$REPACKED_TAR"
-                    log "WARNING: Repack failed, keeping original archive"
+                    log "ERROR: Repack failed, keeping original archive"
                 fi
+            else
+                log "ERROR: Could not parse Config from manifest.json"
             fi
+        else
+            log "ERROR: Could not parse RepoTags from manifest.json"
         fi
+    elif [[ ! -f "$TEMP_EXTRACT/manifest.json" ]]; then
+        log "ERROR: Archive has no manifest.json - not a valid docker-archive!"
     fi
 
     rm -rf "$TEMP_EXTRACT"
+    trap - EXIT
 fi
 
 # Final verification
