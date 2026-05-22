@@ -52,8 +52,8 @@ jobs:
           # Get latest version tag (vX.Y.Z format)
           CURRENT_VERSION=$(git tag -l 'v*' | sort -V | tail -1 | sed 's/^v//' || true)
           if [[ -z "$CURRENT_VERSION" ]]; then
-            CURRENT_VERSION="0.0.0"
-            echo "No version tags found, using baseline: $CURRENT_VERSION"
+            CURRENT_VERSION="n/a"
+            echo "No version tags found"
           else
             echo "Current version from tags: $CURRENT_VERSION"
           fi
@@ -195,6 +195,13 @@ jobs:
 
           if [[ "$FORCE" == "true" ]]; then
             echo "Force build requested for version $LATEST"
+            set_output new_version_available "true"
+            exit 0
+          fi
+
+          # Handle n/a (no tags exist) - any valid version is newer
+          if [[ "$CURRENT" == "n/a" ]]; then
+            echo "No existing version - will build $LATEST"
             set_output new_version_available "true"
             exit 0
           fi
