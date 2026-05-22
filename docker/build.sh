@@ -356,7 +356,7 @@ validate_installer_url() {
 
     [[ "$url" =~ ^https://[^[:space:]]+$ ]] || fatal "Invalid $label URL: must be HTTPS without whitespace"
     case "$url" in
-        https://*.ui.com/*|https://ui.com/*|https://dl.ui.com/*) ;;
+        https://*.ui.com/*|https://ui.com/*|https://dl.ui.com/*|https://fw-download.ubnt.com/*) ;;
         *) fatal "Invalid $label URL host: $url" ;;
     esac
 }
