@@ -631,7 +631,7 @@ run_extraction() {
                     local new_logs
                     new_logs=$(docker logs --tail 5 "$container_name" 2>&1 || true)
                     if [[ "$new_logs" != "$last_log_lines" ]]; then
-                        diag "Progress (${elapsed}s): $(echo "$new_logs" | tail -1 | head -c 100)"
+                        diag "Progress (${elapsed}s): $(echo "$new_logs" | tail -1 | head -c 200)"
                         last_log_lines="$new_logs"
                     fi
                 fi
