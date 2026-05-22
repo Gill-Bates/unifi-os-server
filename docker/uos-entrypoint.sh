@@ -179,12 +179,18 @@ preseed_postgres() {
     local pg_data="/var/lib/postgresql/14/main"
     local pg_bin="/usr/lib/postgresql/14/bin"
     local pg_log="/var/log/postgresql/preseed.log"
+    local pg_run="/var/run/postgresql"
     
     mkdir -p /var/log/postgresql
     chown postgres:postgres /var/log/postgresql
     touch "$pg_log"
     chown postgres:postgres "$pg_log"
     chmod 640 "$pg_log"
+
+    # pg_ctl on Debian expects the runtime socket/lock dir to exist and be writable.
+    mkdir -p "$pg_run"
+    chown postgres:postgres "$pg_run"
+    chmod 775 "$pg_run"
     
     # Ensure data directory exists with correct permissions
     mkdir -p "$pg_data"
@@ -209,6 +215,7 @@ preseed_postgres() {
     if ! runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" \
          -l "$pg_log" start -w -t 30 >/dev/null 2>&1; then
         log_warn "PostgreSQL temporary start failed, will retry on next boot"
+        log_warn "Likely causes: invalid pgdata, missing runtime dirs, or permission mismatch"
         log_warn "Last PostgreSQL preseed log lines:"
         tail -n 20 "$pg_log" 2>/dev/null | sed 's/^/  │    /' >&2 || true
         return 1
