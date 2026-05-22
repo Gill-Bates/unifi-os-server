@@ -38,13 +38,11 @@ case "$1" in
         ;;
     user-status)
         # Fake a successful user-status to avoid the installer spinning
+        # Be lenient: if user doesn't exist yet, fake UID 1000
         user="${2:-}"
         require_user "$user"
         valid_user "$user"
-        if ! uid=$(id -u "$user" 2>/dev/null); then
-            echo "loginctl stub: user does not exist: $user" >&2
-            exit 1
-        fi
+        uid=$(id -u "$user" 2>/dev/null || echo "1000")
         printf '%s (%s)\n' "$user" "$uid"
         printf '           State: active\n'
         printf '            Unit: user-%s.slice\n' "$uid"

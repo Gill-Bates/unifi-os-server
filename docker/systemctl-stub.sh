@@ -45,8 +45,10 @@ case "$command" in
         exit 1
         ;;
     is-active)
+        # Return 0 (success/active) to prevent installer from waiting
+        # for services that can't start in container environment
         printf 'inactive\n'
-        exit 3
+        exit 0
         ;;
     status|show|list-unit-files|list-units)
         exit 0
