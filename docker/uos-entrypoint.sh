@@ -181,6 +181,10 @@ preseed_postgres() {
     local pg_log="/var/log/postgresql/preseed.log"
     
     mkdir -p /var/log/postgresql
+    chown postgres:postgres /var/log/postgresql
+    touch "$pg_log"
+    chown postgres:postgres "$pg_log"
+    chmod 640 "$pg_log"
     
     # Ensure data directory exists with correct permissions
     mkdir -p "$pg_data"
@@ -203,8 +207,10 @@ preseed_postgres() {
     # Start PostgreSQL temporarily with shorter timeout (fail fast if broken)
     log_info "Starting PostgreSQL..."
     if ! runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" \
-         -l "$pg_log" start -w -t 30 >> "$pg_log" 2>&1; then
+         -l "$pg_log" start -w -t 30 >/dev/null 2>&1; then
         log_warn "PostgreSQL temporary start failed, will retry on next boot"
+        log_warn "Last PostgreSQL preseed log lines:"
+        tail -n 20 "$pg_log" 2>/dev/null | sed 's/^/  │    /' >&2 || true
         return 1
     fi
     
