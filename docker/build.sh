@@ -610,18 +610,28 @@ run_extraction() {
             running)
                 # Check if extraction completed - file must exist AND be stable
                 if [[ -f "${output_dir}/uosserver.tar" ]]; then
-                    local current_size prev_size
+                    local current_size prev_size prev_size2
                     current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
                     
-                    # Wait for file to stop growing
-                    sleep 2
+                    # Wait longer for file to stop growing (handles repair/repack phase)
+                    sleep 3
                     prev_size=$current_size
                     current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
                     
-                    if (( current_size == prev_size && current_size > 500000000 )); then
-                        log "Extraction artifact found while container running (size stable at $((current_size / 1024 / 1024))MB)"
-                        success=true
-                        break
+                    # Double-check with another wait to ensure repair phase is complete
+                    sleep 3
+                    prev_size2=$current_size
+                    current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
+                    
+                    if (( current_size == prev_size && current_size == prev_size2 && current_size > 500000000 )); then
+                        # Also verify the extraction script has finished
+                        if docker logs --tail 5 "$container_name" 2>&1 | grep -q "Extraction complete!"; then
+                            log "Extraction artifact found while container running (size stable at $((current_size / 1024 / 1024))MB)"
+                            success=true
+                            break
+                        else
+                            diag "Tar stable but extraction script not finished yet"
+                        fi
                     elif (( current_size > 0 )); then
                         diag "Tar file exists but still growing: $((current_size / 1024 / 1024))MB"
                     fi
@@ -743,6 +753,28 @@ load_extracted_image() {
 
     log "Phase 3: Loading extracted image into Docker"
 
+    # Validate tar file before loading
+    if [[ ! -f "$tar_path" ]]; then
+        error "Tar file does not exist: $tar_path"
+        return 1
+    fi
+    
+    local tar_size_mb
+    tar_size_mb=$(($(stat -c%s "$tar_path") / 1024 / 1024))
+    diag "Tar file size: ${tar_size_mb}MB"
+    
+    # Check tar format (docker-archive vs OCI)
+    diag "Tar contents (top-level):"
+    tar -tf "$tar_path" 2>/dev/null | grep -v '/' | head -10 || true
+    
+    # docker-archive format should have manifest.json
+    if ! tar -tf "$tar_path" 2>/dev/null | grep -q '^manifest.json$'; then
+        error "Tar is not in docker-archive format (missing manifest.json)"
+        diag "Full tar listing:"
+        tar -tf "$tar_path" 2>/dev/null | head -30 || true
+        return 1
+    fi
+
     # Capture images before load to determine what's new
     local before_images
     before_images=$(docker images -q --no-trunc | sort -u)
@@ -752,6 +784,8 @@ load_extracted_image() {
     load_output=$(docker load -i "$tar_path" 2>&1) || {
         error "docker load failed"
         echo "$load_output" >&2
+        diag "Tar structure for debugging:"
+        tar -tvf "$tar_path" 2>/dev/null | head -20 || true
         return 1
     }
     echo "$load_output" >&2

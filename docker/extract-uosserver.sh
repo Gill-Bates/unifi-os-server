@@ -194,7 +194,9 @@ log "Exporting image to $OUTPUT_TAR (this may take a while)..."
 log "Saving image as OCI format first..."
 if podman --root "$STORAGE_BASE" save --format oci-archive -o "$OCI_TAR" "$IMAGE_NAME"; then
     log "OCI archive created, converting to docker-archive with skopeo..."
-    if skopeo copy "oci-archive:$OCI_TAR" "docker-archive:$OUTPUT_TAR:$IMAGE_NAME"; then
+    # Use simpler image name for docker-archive (some Docker versions are picky)
+    SIMPLE_IMAGE_NAME="uosserver:extracted"
+    if skopeo copy "oci-archive:$OCI_TAR" "docker-archive:$OUTPUT_TAR:$SIMPLE_IMAGE_NAME"; then
         log "skopeo conversion succeeded"
         rm -f "$OCI_TAR"
     else
