@@ -266,6 +266,7 @@ preserve_failure() {
         docker exec "$container_name" podman ps -a > "${prefix}-podman-ps.txt" 2>&1 || true
         docker exec "$container_name" podman images > "${prefix}-podman-images.txt" 2>&1 || true
         docker exec "$container_name" podman logs uosserver > "${prefix}-podman-uosserver.log" 2>&1 || true
+        docker exec "$container_name" cat /tmp/systemctl-stub.log > "${prefix}-systemctl-stub.log" 2>&1 || true
     fi
 
     warn "Failure artifacts saved to: ${prefix}*"
