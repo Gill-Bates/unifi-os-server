@@ -125,6 +125,15 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Built version: ${VERSION}"
 
+      - name: Upload failure artifacts (amd64)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-artifacts-amd64
+          path: /tmp/uos-build-*/failure-*
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Trivy vulnerability scan (amd64)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -255,6 +264,15 @@ jobs:
           fi
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload failure artifacts (arm64)
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: failure-artifacts-arm64
+          path: /tmp/uos-build-*/failure-*
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Trivy vulnerability scan (arm64)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

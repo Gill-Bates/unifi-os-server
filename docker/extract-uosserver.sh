@@ -91,19 +91,45 @@ log "Installer process finished with exit code: $installer_status"
 # Wait for any remaining podman processes (installer may spawn background jobs)
 # Typical builds take ~10 minutes; allow up to 15 minutes (180 × 5s = 900s)
 log "Waiting for background podman processes..."
+PODMAN_FINISHED=false
 for i in {1..180}; do
     PODMAN_PROCS=$(pgrep -c podman 2>/dev/null) || PODMAN_PROCS=0
     if (( PODMAN_PROCS == 0 )); then
         log "No more podman processes running"
+        PODMAN_FINISHED=true
         break
     fi
     log "Still $PODMAN_PROCS podman process(es) running, waiting... (${i}/180)"
+    
+    # Every 60s (12 iterations), show what podman is doing
+    if (( i % 12 == 0 )); then
+        log "=== Podman diagnostic (iteration $i) ==="
+        ps aux | grep -E '[p]odman' | head -5 || true
+        # Show disk activity
+        df -h /home /var/lib 2>/dev/null | head -3 || true
+    fi
+    
     sleep 5
 done
+
+if [[ "$PODMAN_FINISHED" != "true" ]]; then
+    log "ERROR: Podman processes still running after 15 minute timeout"
+    log "Active podman processes:"
+    ps aux | grep -E '[p]odman' || true
+    pstree -p || true
+    error "Timeout waiting for podman build to complete"
+fi
 
 # Additional settle time
 log "Waiting for filesystem to settle..."
 sleep 10
+
+# Log what podman did (if anything)
+log "Checking for podman activity..."
+if [[ -f /var/log/podman.log ]]; then
+    log "Podman log tail:"
+    tail -50 /var/log/podman.log || true
+fi
 
 # Find the uosserver storage directory
 # The installer creates a uosserver user and runs podman as that user
