@@ -247,27 +247,27 @@ jobs:
           fi
           
           # Check which images are available
-          IMAGES=""
+          IMAGES=()
           if docker manifest inspect "${IMAGE_NAME}:${VERSION}-amd64" > /dev/null 2>&1; then
-            IMAGES="${IMAGE_NAME}:${VERSION}-amd64"
+            IMAGES+=("${IMAGE_NAME}:${VERSION}-amd64")
           fi
           if docker manifest inspect "${IMAGE_NAME}:${VERSION}-arm64" > /dev/null 2>&1; then
-            IMAGES="${IMAGES} ${IMAGE_NAME}:${VERSION}-arm64"
+            IMAGES+=("${IMAGE_NAME}:${VERSION}-arm64")
           fi
           
-          if [[ -z "$IMAGES" ]]; then
+          if (( ${#IMAGES[@]} == 0 )); then
             echo "No images available for manifest"
             exit 1
           fi
           
-          echo "Creating manifest with: $IMAGES"
+          echo "Creating manifest with: ${IMAGES[*]}"
           
           # Create version manifest
-          docker manifest create "${IMAGE_NAME}:${VERSION}" $IMAGES --amend
+          docker manifest create "${IMAGE_NAME}:${VERSION}" "${IMAGES[@]}" --amend
           docker manifest push "${IMAGE_NAME}:${VERSION}"
           
           # Create latest manifest
-          docker manifest create "${IMAGE_NAME}:latest" $IMAGES --amend
+          docker manifest create "${IMAGE_NAME}:latest" "${IMAGES[@]}" --amend
           docker manifest push "${IMAGE_NAME}:latest"
           
           echo "Pushed manifests:"

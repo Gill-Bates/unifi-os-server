@@ -161,33 +161,39 @@ jobs:
           URL_X64="${{ steps.latest.outputs.url_x64 }}"
           URL_ARM64="${{ steps.latest.outputs.url_arm64 }}"
           FORCE="${{ github.event.inputs.force_build || 'false' }}"
+
+          set_output() {
+            local key="$1"
+            local value="$2"
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
+          }
           
           echo "API metadata available: $API_AVAILABLE"
           echo "Current version: $CURRENT"
           echo "Latest version: $LATEST"
           echo "Force build: $FORCE"
           
-          echo "api_available=$API_AVAILABLE" >> "$GITHUB_OUTPUT"
-          echo "current_version=$CURRENT" >> "$GITHUB_OUTPUT"
-          echo "latest_version=$LATEST" >> "$GITHUB_OUTPUT"
-          echo "url_x64=$URL_X64" >> "$GITHUB_OUTPUT"
-          echo "url_arm64=$URL_ARM64" >> "$GITHUB_OUTPUT"
+          set_output api_available "$API_AVAILABLE"
+          set_output current_version "$CURRENT"
+          set_output latest_version "$LATEST"
+          set_output url_x64 "$URL_X64"
+          set_output url_arm64 "$URL_ARM64"
 
           if [[ "$API_AVAILABLE" != "true" ]]; then
             echo "::warning::Skipping version comparison because Ubiquiti API metadata is unavailable"
-            echo "new_version_available=false" >> "$GITHUB_OUTPUT"
+            set_output new_version_available "false"
             exit 0
           fi
 
           if [[ -z "$LATEST" || -z "$URL_X64" || -z "$URL_ARM64" ]]; then
             echo "::warning::Could not determine complete latest release metadata"
-            echo "new_version_available=false" >> "$GITHUB_OUTPUT"
+            set_output new_version_available "false"
             exit 0
           fi
 
           if [[ "$FORCE" == "true" ]]; then
             echo "Force build requested for version $LATEST"
-            echo "new_version_available=true" >> "$GITHUB_OUTPUT"
+            set_output new_version_available "true"
             exit 0
           fi
 
@@ -195,38 +201,40 @@ jobs:
             NEWER=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | tail -1)
             if [[ "$NEWER" == "$LATEST" && "$NEWER" != "$CURRENT" ]]; then
               echo "New version available: $LATEST (current: $CURRENT)"
-              echo "new_version_available=true" >> "$GITHUB_OUTPUT"
+              set_output new_version_available "true"
             else
               echo "Current version is up to date or newer"
-              echo "new_version_available=false" >> "$GITHUB_OUTPUT"
+              set_output new_version_available "false"
             fi
           else
             echo "Already at latest version"
-            echo "new_version_available=false" >> "$GITHUB_OUTPUT"
+            set_output new_version_available "false"
           fi
 
       - name: Create summary
         run: |
-          echo "## UniFi OS Server Version Check" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| API Metadata Available | ${{ steps.check.outputs.api_available }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Current Version | ${{ steps.check.outputs.current_version }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Latest Version | ${{ steps.check.outputs.latest_version }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Update Available | ${{ steps.check.outputs.new_version_available }} |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## UniFi OS Server Version Check"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| API Metadata Available | ${{ steps.check.outputs.api_available }} |"
+            echo "| Current Version | ${{ steps.check.outputs.current_version }} |"
+            echo "| Latest Version | ${{ steps.check.outputs.latest_version }} |"
+            echo "| Update Available | ${{ steps.check.outputs.new_version_available }} |"
 
-          if [[ "${{ steps.check.outputs.api_available }}" != "true" ]]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "API request to Ubiquiti timed out or failed. This run was skipped safely." >> $GITHUB_STEP_SUMMARY
-          fi
+            if [[ "${{ steps.check.outputs.api_available }}" != "true" ]]; then
+              echo ""
+              echo "API request to Ubiquiti timed out or failed. This run was skipped safely."
+            fi
 
-          if [[ "${{ steps.check.outputs.new_version_available }}" == "true" ]]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### Download URLs" >> $GITHUB_STEP_SUMMARY
-            echo "- x64: \`${{ steps.check.outputs.url_x64 }}\`" >> $GITHUB_STEP_SUMMARY
-            echo "- arm64: \`${{ steps.check.outputs.url_arm64 }}\`" >> $GITHUB_STEP_SUMMARY
-          fi
+            if [[ "${{ steps.check.outputs.new_version_available }}" == "true" ]]; then
+              echo ""
+              echo "### Download URLs"
+              echo "- x64: \`${{ steps.check.outputs.url_x64 }}\`"
+              echo "- arm64: \`${{ steps.check.outputs.url_arm64 }}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   trigger-build:
     name: Trigger build for new version

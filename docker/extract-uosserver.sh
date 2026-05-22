@@ -23,7 +23,7 @@ validate_installer_url() {
         ""|*$'\n'*|*$'\r'*|*" "*)
             error "Invalid UOS_INSTALLER_URL"
             ;;
-        https://*.ui.com/*|https://ui.com/*|https://dl.ui.com/*)
+        https://*.ui.com/*|https://ui.com/*|https://dl.ui.com/*|https://fw-download.ubnt.com/*)
             ;;
         *)
             error "Unexpected installer URL host: $url"
