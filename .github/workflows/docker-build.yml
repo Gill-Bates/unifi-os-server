@@ -203,13 +203,19 @@ jobs:
           # Verify key files exist
           echo "Checking container filesystem..."
           docker exec smoke-test-amd64 test -f /usr/share/unifi-os/uos-server.jar || {
-            echo "ERROR: uos-server.jar not found"
+            echo "ERROR: uos-server.jar not found at /usr/share/unifi-os/"
+            echo "Contents of /usr/share/unifi-os/:"
+            docker exec smoke-test-amd64 ls -la /usr/share/unifi-os/ 2>&1 || echo "  (directory does not exist)"
+            echo "Searching for uos-server.jar:"
+            docker exec smoke-test-amd64 find /usr -name 'uos-server*.jar' 2>/dev/null || echo "  (not found anywhere in /usr)"
             docker rm -f smoke-test-amd64 || true
             exit 1
           }
           
           docker exec smoke-test-amd64 test -x /usr/bin/java || {
-            echo "ERROR: java not executable"
+            echo "ERROR: java not executable at /usr/bin/java"
+            echo "Searching for java:"
+            docker exec smoke-test-amd64 which java 2>/dev/null || docker exec smoke-test-amd64 find /usr -name 'java' -type f 2>/dev/null | head -5 || echo "  (not found)"
             docker rm -f smoke-test-amd64 || true
             exit 1
           }
@@ -384,13 +390,19 @@ jobs:
           # Verify key files exist
           echo "Checking container filesystem..."
           docker exec smoke-test-arm64 test -f /usr/share/unifi-os/uos-server.jar || {
-            echo "ERROR: uos-server.jar not found"
+            echo "ERROR: uos-server.jar not found at /usr/share/unifi-os/"
+            echo "Contents of /usr/share/unifi-os/:"
+            docker exec smoke-test-arm64 ls -la /usr/share/unifi-os/ 2>&1 || echo "  (directory does not exist)"
+            echo "Searching for uos-server.jar:"
+            docker exec smoke-test-arm64 find /usr -name 'uos-server*.jar' 2>/dev/null || echo "  (not found anywhere in /usr)"
             docker rm -f smoke-test-arm64 || true
             exit 1
           }
           
           docker exec smoke-test-arm64 test -x /usr/bin/java || {
-            echo "ERROR: java not executable"
+            echo "ERROR: java not executable at /usr/bin/java"
+            echo "Searching for java:"
+            docker exec smoke-test-arm64 which java 2>/dev/null || docker exec smoke-test-arm64 find /usr -name 'java' -type f 2>/dev/null | head -5 || echo "  (not found)"
             docker rm -f smoke-test-arm64 || true
             exit 1
           }
