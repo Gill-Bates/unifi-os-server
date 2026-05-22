@@ -89,14 +89,15 @@ set -e
 log "Installer process finished with exit code: $installer_status"
 
 # Wait for any remaining podman processes (installer may spawn background jobs)
+# Typical builds take ~10 minutes; allow up to 15 minutes (180 × 5s = 900s)
 log "Waiting for background podman processes..."
-for i in {1..60}; do
+for i in {1..180}; do
     PODMAN_PROCS=$(pgrep -c podman 2>/dev/null) || PODMAN_PROCS=0
     if (( PODMAN_PROCS == 0 )); then
         log "No more podman processes running"
         break
     fi
-    log "Still $PODMAN_PROCS podman process(es) running, waiting... (${i}/30)"
+    log "Still $PODMAN_PROCS podman process(es) running, waiting... (${i}/180)"
     sleep 5
 done
 
