@@ -2,7 +2,7 @@
 # Runs inside the extractor container to:
 # 1. Download and run the Ubiquiti installer (will fail at container start)
 # 2. Export the extracted uosserver image to /output/uosserver.tar
-set -euo pipefail
+set -e
 
 INSTALLER_PATH="/opt/uos/installer/uos-installer"
 OUTPUT_DIR="/output"
@@ -16,46 +16,10 @@ error() {
     exit 1
 }
 
-validate_installer_url() {
-    local url="$1"
-    local host
-
-    # Reject empty, multiline, or whitespace-containing URLs
-    case "$url" in
-        ""|*$'\n'*|*$'\r'*|*" "*)
-            error "Invalid UOS_INSTALLER_URL"
-            ;;
-    esac
-
-    # Must start with https://
-    [[ "$url" =~ ^https:// ]] || error "UOS_INSTALLER_URL must use https://"
-
-    # Extract host from URL: strip scheme, then take everything before first /
-    host="${url#https://}"
-    host="${host%%/*}"
-    host="${host%%:*}"  # Remove port if present
-
-    # Validate host against allowlist (exact match or subdomain of ui.com)
-    case "$host" in
-        ui.com|dl.ui.com|fw-download.ubnt.com)
-            ;;
-        *.ui.com)
-            # Verify it's actually a subdomain, not a suffix match
-            [[ "$host" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.ui\.com$ ]] || \
-                error "Unexpected installer URL host: $host"
-            ;;
-        *)
-            error "Unexpected installer URL host: $host"
-            ;;
-    esac
-}
-
 # Check required env var
 if [[ -z "$UOS_INSTALLER_URL" ]]; then
     error "UOS_INSTALLER_URL environment variable is required"
 fi
-
-validate_installer_url "$UOS_INSTALLER_URL"
 
 # Check output directory is mounted
 if [[ ! -d "$OUTPUT_DIR" ]]; then
@@ -65,13 +29,7 @@ fi
 # Download installer if not present
 if [[ ! -x "$INSTALLER_PATH" ]]; then
     log "Downloading installer from $UOS_INSTALLER_URL"
-    curl --fail --silent --show-error --location \
-        --connect-timeout 10 \
-        --max-time 300 \
-        --retry 3 \
-        --retry-all-errors \
-        -o "$INSTALLER_PATH" \
-        "$UOS_INSTALLER_URL"
+    curl -fsSL -o "$INSTALLER_PATH" "$UOS_INSTALLER_URL"
     chmod +x "$INSTALLER_PATH"
 fi
 
@@ -82,54 +40,24 @@ INSTALLER_PID=$!
 
 # Wait for installer process to complete
 log "Waiting for installer process (PID: $INSTALLER_PID) to complete..."
-set +e
-wait "$INSTALLER_PID"
-installer_status=$?
-set -e
-log "Installer process finished with exit code: $installer_status"
+wait $INSTALLER_PID || true
+log "Installer process finished"
 
 # Wait for any remaining podman processes (installer may spawn background jobs)
-# Typical builds take ~10 minutes; allow up to 15 minutes (180 × 5s = 900s)
 log "Waiting for background podman processes..."
-PODMAN_FINISHED=false
-for i in {1..180}; do
-    PODMAN_PROCS=$(pgrep -c podman 2>/dev/null) || PODMAN_PROCS=0
+for i in {1..30}; do
+    PODMAN_PROCS=$(pgrep -c podman 2>/dev/null || echo "0")
     if (( PODMAN_PROCS == 0 )); then
         log "No more podman processes running"
-        PODMAN_FINISHED=true
         break
     fi
-    log "Still $PODMAN_PROCS podman process(es) running, waiting... (${i}/180)"
-    
-    # Every 60s (12 iterations), show what podman is doing
-    if (( i % 12 == 0 )); then
-        log "=== Podman diagnostic (iteration $i) ==="
-        ps aux | grep -E '[p]odman' | head -5 || true
-        # Show disk activity
-        df -h /home /var/lib 2>/dev/null | head -3 || true
-    fi
-    
+    log "Still $PODMAN_PROCS podman process(es) running, waiting... (${i}/30)"
     sleep 5
 done
-
-if [[ "$PODMAN_FINISHED" != "true" ]]; then
-    log "ERROR: Podman processes still running after 15 minute timeout"
-    log "Active podman processes:"
-    ps aux | grep -E '[p]odman' || true
-    pstree -p || true
-    error "Timeout waiting for podman build to complete"
-fi
 
 # Additional settle time
 log "Waiting for filesystem to settle..."
 sleep 10
-
-# Log what podman did (if anything)
-log "Checking for podman activity..."
-if [[ -f /var/log/podman.log ]]; then
-    log "Podman log tail:"
-    tail -50 /var/log/podman.log || true
-fi
 
 # Find the uosserver storage directory
 # The installer creates a uosserver user and runs podman as that user
@@ -214,6 +142,11 @@ podman --root "$STORAGE_BASE" images 2>/dev/null || true
 IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -E '^(localhost/)?uosserver:' | head -1 || true)
 
 if [[ -z "$IMAGE_NAME" ]]; then
+    # Try without repository prefix
+    IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -v '<none>' | head -1 || true)
+fi
+
+if [[ -z "$IMAGE_NAME" ]]; then
     log "Available images in storage:"
     podman --root "$STORAGE_BASE" images 2>/dev/null || true
     log "Storage directory contents:"
@@ -277,6 +210,7 @@ if ! echo "$ARCHIVE_FILES" | grep -qE '^(manifest\.json|repositories)$'; then
     log "WARNING: Archive missing manifest.json/repositories - attempting repair"
     
     TEMP_EXTRACT=$(mktemp -d)
+    trap "rm -rf '$TEMP_EXTRACT'" EXIT
     
     tar -xf "$OUTPUT_TAR" -C "$TEMP_EXTRACT"
     log "Extracted archive contents:"
@@ -297,20 +231,16 @@ if ! echo "$ARCHIVE_FILES" | grep -qE '^(manifest\.json|repositories)$'; then
                 printf '{\"%s\":{\"%s\":\"%s\"}}\n' "$REPO_NAME" "$TAG_NAME" "$LAYER_ID" > "$TEMP_EXTRACT/repositories"
                 log "Created repositories file"
                 
-                # Repack to temporary file first (preserve original on failure)
-                REPACKED_TAR="${OUTPUT_TAR}.repacked"
-                if tar -cf "$REPACKED_TAR" -C "$TEMP_EXTRACT" .; then
-                    mv -f "$REPACKED_TAR" "$OUTPUT_TAR"
-                    TAR_SIZE_MB=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null | awk '{printf "%.0f", $1/1024/1024}')
-                    log "Repacked archive: ${TAR_SIZE_MB}MB"
-                else
-                    rm -f "$REPACKED_TAR"
-                    log "WARNING: Repack failed, keeping original archive"
-                fi
+                # Repack
+                rm -f "$OUTPUT_TAR"
+                tar -cf "$OUTPUT_TAR" -C "$TEMP_EXTRACT" .
+                TAR_SIZE_MB=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null | awk '{printf "%.0f", $1/1024/1024}')
+                log "Repacked archive: ${TAR_SIZE_MB}MB"
             fi
         fi
     fi
-
+    
+    trap - EXIT
     rm -rf "$TEMP_EXTRACT"
 fi
 
