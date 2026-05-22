@@ -252,12 +252,16 @@ preserve_failure() {
     diag "Saving container logs..."
     docker logs "$container_name" > "${prefix}-stdout.log" 2> "${prefix}-stderr.log" || true
 
-    # Save filesystem if container exists
+    # Save filesystem only if explicitly requested (can be multi-GB and slow)
     local state
     state=$(get_container_state "$container_name")
-    if [[ "$state" == "exited" || "$state" == "dead" || "$state" == "running" ]]; then
-        diag "Exporting container filesystem (may take a moment)..."
-        docker export "$container_name" > "${prefix}-filesystem.tar" 2>/dev/null || true
+    if [[ "${EXPORT_FAILURE_FILESYSTEM:-false}" == "true" ]]; then
+        if [[ "$state" == "exited" || "$state" == "dead" || "$state" == "running" ]]; then
+            diag "Exporting container filesystem (EXPORT_FAILURE_FILESYSTEM=true)..."
+            docker export "$container_name" > "${prefix}-filesystem.tar" 2>/dev/null || true
+        fi
+    else
+        diag "Skipping filesystem export (set EXPORT_FAILURE_FILESYSTEM=true to enable)"
     fi
 
     # Try to get inner podman state if possible

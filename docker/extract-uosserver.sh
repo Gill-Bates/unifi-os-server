@@ -79,14 +79,14 @@ fi
 log "Running installer (expect it to fail at container startup)..."
 "$INSTALLER_PATH" --non-interactive --force-install &
 INSTALLER_PID=$!
+log "Installer started (PID: $INSTALLER_PID)"
 
-# Wait for installer process to complete
-log "Waiting for installer process (PID: $INSTALLER_PID) to complete..."
-wait $INSTALLER_PID || true
-log "Installer process finished"
+# IMAGE-AWARE MONITORING: Poll for uosserver image WHILE installer runs
+# The installer may try to start a runtime container that hangs on systemd - we don't need to wait for it
+# Once we have the image, we can kill the installer and export.
 
-# Find the uosserver storage directory
-# The installer creates a uosserver user and runs podman as that user
+# First, we need to find the storage path - poll for it to appear
+log "Waiting for podman storage to be created..."
 STORAGE_PATHS=(
     "/home/uosserver/.local/share/containers/storage"
     "/var/lib/containers/storage"
@@ -94,21 +94,26 @@ STORAGE_PATHS=(
 )
 
 STORAGE_BASE=""
-for path in "${STORAGE_PATHS[@]}"; do
-    if [[ -d "$path/overlay-images" ]]; then
-        log "Found podman storage at: $path"
-        STORAGE_BASE="$path"
+for (( wait_storage=0; wait_storage < 120; wait_storage+=5 )); do
+    for path in "${STORAGE_PATHS[@]}"; do
+        if [[ -d "$path/overlay-images" ]]; then
+            STORAGE_BASE="$path"
+            break 2
+        fi
+    done
+    
+    # Also search dynamically
+    STORAGE_BASE=$(find /home -name "overlay-images" -type d 2>/dev/null | head -1 | sed 's|/overlay-images$||' || true)
+    [[ -n "$STORAGE_BASE" ]] && break
+    
+    # Check if installer is still running
+    if ! kill -0 "$INSTALLER_PID" 2>/dev/null; then
+        log "Installer exited before storage was found"
         break
     fi
+    
+    sleep 5
 done
-
-if [[ -z "$STORAGE_BASE" ]]; then
-    log "Searching for podman storage..."
-    STORAGE_BASE=$(find /home -name "overlay-images" -type d 2>/dev/null | head -1 | sed 's|/overlay-images$||' || true)
-    if [[ -z "$STORAGE_BASE" ]]; then
-        STORAGE_BASE=$(find /var/lib -name "overlay-images" -type d 2>/dev/null | head -1 | sed 's|/overlay-images$||' || true)
-    fi
-fi
 
 if [[ -z "$STORAGE_BASE" || ! -d "$STORAGE_BASE" ]]; then
     log "Podman storage locations searched:"
@@ -117,18 +122,20 @@ if [[ -z "$STORAGE_BASE" || ! -d "$STORAGE_BASE" ]]; then
     done
     log "Home directory contents:"
     ls -la /home/ 2>/dev/null || true
+    # Wait for installer to finish and check exit code
+    wait "$INSTALLER_PID" 2>/dev/null || true
     error "Podman storage not found"
 fi
 
 log "Using podman storage: $STORAGE_BASE"
 
-# IMAGE-AWARE MONITORING: Poll for uosserver image instead of waiting for podman to exit
-# The installer may start a runtime container that hangs on systemd - we don't need to wait for it
-log "Polling for uosserver image (image-aware monitoring)..."
+# Now poll for the uosserver image while installer is still running
+log "Polling for uosserver image (parallel to installer)..."
 IMAGE_FOUND=false
 PREV_SIZE=0
 STABLE_COUNT=0
 MAX_WAIT=300  # 5 minutes max
+IMAGE_NAME=""
 
 for (( waited=0; waited < MAX_WAIT; waited+=5 )); do
     # Check if uosserver image exists (matches all variants: uosserver:, localhost/uosserver:, docker.io/library/uosserver:)
@@ -144,6 +151,11 @@ for (( waited=0; waited < MAX_WAIT; waited+=5 )); do
             if (( STABLE_COUNT >= 3 )); then
                 log "Image found and storage stable at ${STORAGE_SIZE}MB"
                 IMAGE_FOUND=true
+                # Kill installer - we have what we need
+                log "Terminating installer (image acquired)..."
+                kill -TERM "$INSTALLER_PID" 2>/dev/null || true
+                sleep 2
+                kill -KILL "$INSTALLER_PID" 2>/dev/null || true
                 break
             fi
         else
@@ -158,8 +170,23 @@ for (( waited=0; waited < MAX_WAIT; waited+=5 )); do
         fi
     fi
     
+    # Check if installer exited (maybe it crashed)
+    if ! kill -0 "$INSTALLER_PID" 2>/dev/null; then
+        log "Installer exited - checking if image was created..."
+        # Final check for image
+        IMAGE_NAME=$(podman --root "$STORAGE_BASE" images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -E '(^|/)uosserver:' | head -1 || true)
+        if [[ -n "$IMAGE_NAME" ]]; then
+            log "Found image after installer exit: $IMAGE_NAME"
+            IMAGE_FOUND=true
+        fi
+        break
+    fi
+    
     sleep 5
 done
+
+# Clean up installer process
+wait "$INSTALLER_PID" 2>/dev/null || true
 
 if [[ "$IMAGE_FOUND" != "true" ]]; then
     log "ERROR: uosserver image not found after ${MAX_WAIT}s"
