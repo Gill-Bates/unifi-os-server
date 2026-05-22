@@ -206,8 +206,9 @@ log "Verifying tar archive format..."
 ARCHIVE_FILES=$(tar -tf "$OUTPUT_TAR" 2>/dev/null | head -20)
 echo "$ARCHIVE_FILES"
 
-if ! echo "$ARCHIVE_FILES" | grep -qE '^(manifest\.json|repositories)$'; then
-    log "WARNING: Archive missing manifest.json/repositories - attempting repair"
+# Check specifically for missing repositories file (Docker requires it)
+if ! echo "$ARCHIVE_FILES" | grep -q '^repositories$'; then
+    log "WARNING: Archive missing repositories file - attempting repair"
     
     TEMP_EXTRACT=$(mktemp -d)
     trap "rm -rf '$TEMP_EXTRACT'" EXIT
