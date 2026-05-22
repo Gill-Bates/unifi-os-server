@@ -50,11 +50,13 @@ jobs:
         id: current
         run: |
           # Get latest version tag (vX.Y.Z format)
-          CURRENT_VERSION=$(git tag -l 'v*' | sort -V | tail -1 | sed 's/^v//' || echo "0.0.0")
+          CURRENT_VERSION=$(git tag -l 'v*' | sort -V | tail -1 | sed 's/^v//' || true)
           if [[ -z "$CURRENT_VERSION" ]]; then
             CURRENT_VERSION="0.0.0"
+            echo "No version tags found, using baseline: $CURRENT_VERSION"
+          else
+            echo "Current version from tags: $CURRENT_VERSION"
           fi
-          echo "Current version from tags: $CURRENT_VERSION"
           echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Fetch latest version from Ubiquiti API
