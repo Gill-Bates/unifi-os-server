@@ -7,22 +7,32 @@ set -e
 # Banner
 # -----------------------------------------------------------------------------
 cat << 'EOF'
-             _  __ _                                            
- _   _ _ __ (_)/ _(_)   ___  ___   ___  ___ _ ____   _____ _ __ 
-| | | | '_ \| | |_| |  / _ \/ __| / __|/ _ \ '__\ \ / / _ \ '__|
-| |_| | | | | |  _| | | (_) \__ \ \__ \  __/ |   \ V /  __/ |   
- \__,_|_| |_|_|_| |_|  \___/|___/ |___/\___|_|    \_/ \___|_|   
-       
-        https://github.com/Gill-Bates/unifi-os-server
+
+  ╭─────────────────────────────────────────────────────────────────────────╮
+  │             _  __ _                                                     │
+  │  _   _ _ __ (_)/ _(_)   ___  ___   ___  ___ _ ____   _____ _ __         │
+  │ | | | | '_ \| | |_| |  / _ \/ __| / __|/ _ \ '__\ \ / / _ \ '__|        │
+  │ | |_| | | | | |  _| | | (_) \__ \ \__ \  __/ |   \ V /  __/ |           │
+  │  \__,_|_| |_|_|_| |_|  \___/|___/ |___/\___|_|    \_/ \___|_|           │
+  │                                                                         │
+  │            https://github.com/Gill-Bates/unifi-os-server                │
+  ╰─────────────────────────────────────────────────────────────────────────╯
 
 EOF
 
 # -----------------------------------------------------------------------------
 # Logging helpers with timestamps for better observability
 # -----------------------------------------------------------------------------
-log_info()  { echo "[$(date -Iseconds)] INFO:  $*"; }
-log_warn()  { echo "[$(date -Iseconds)] WARN:  $*" >&2; }
-log_error() { echo "[$(date -Iseconds)] ERROR: $*" >&2; }
+log_section() { 
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────────────────┐"
+    printf "│  %-71s │\n" "$*"
+    echo "└─────────────────────────────────────────────────────────────────────────┘"
+}
+log_info()    { printf "  ├─ %s\n" "$*"; }
+log_success() { printf "  │  ✓ %s\n" "$*"; }
+log_warn()    { printf "  │  ⚠ %s\n" "$*" >&2; }
+log_error()   { printf "  │  ✗ %s\n" "$*" >&2; }
 
 # -----------------------------------------------------------------------------
 # DRY helper for directory initialization
@@ -76,6 +86,8 @@ if [ -z "${UOS_SERVER_VERSION:-}" ]; then
     exit 1
 fi
 
+log_section "Configuration"
+
 # -----------------------------------------------------------------------------
 # Persist UOS_UUID env var
 # UniFi OS expects a UUID with version nibble '5' at position 15 (0-indexed 14).
@@ -84,21 +96,22 @@ fi
 # -----------------------------------------------------------------------------
 if [ ! -f /data/uos_uuid ]; then
     if [ -n "${UOS_UUID:-}" ]; then
-        log_info "Setting UOS_UUID to $UOS_UUID"
         write_uos_uuid "$UOS_UUID"
+        log_success "UOS_UUID: $UOS_UUID"
     else
-        log_info "No UOS_UUID present, generating..."
         UUID=$(cat /proc/sys/kernel/random/uuid)
         # Set version nibble (position 14, 0-indexed) to '5' for UUIDv5 format
         UOS_UUID=$(echo "$UUID" | sed 's/./5/15')
-        log_info "Setting UOS_UUID to $UOS_UUID"
         write_uos_uuid "$UOS_UUID"
+        log_success "UOS_UUID: $UOS_UUID (generated)"
     fi
+else
+    log_success "UOS_UUID: $(cat /data/uos_uuid) (existing)"
 fi
 
 # Read version from env and write version string
-log_info "Setting UOS_SERVER_VERSION to $UOS_SERVER_VERSION"
 echo "UOSSERVER.0000000.$UOS_SERVER_VERSION.0000000.000000.0000" > /usr/lib/version
+log_success "Version: $UOS_SERVER_VERSION"
 
 # Detect architecture and set firmware platform
 ARCH="$(dpkg --print-architecture)"
@@ -111,11 +124,13 @@ else
     exit 1
 fi
 
-log_info "Setting FIRMWARE_PLATFORM to $FIRMWARE_PLATFORM"
 echo "$FIRMWARE_PLATFORM" > /usr/lib/platform
+log_success "Platform: $FIRMWARE_PLATFORM"
 
 # Create eth0 alias to tap0 (requires NET_ADMIN cap & macvlan kernel module loaded on host)
 # This is OPTIONAL - some setups don't have tap0 or macvlan support.
+if [ ! -d "/sys/devices/virtual/net/eth0" ] && [ -d "/sys/devices/virtual/net/tap0" ]; then
+    if ip link add name eth0 link tap0 type macvlan 2>/dev/null; then
 if [ ! -d "/sys/devices/virtual/net/eth0" ] && [ -d "/sys/devices/virtual/net/tap0" ]; then
     if ip link add name eth0 link tap0 type macvlan 2>/dev/null; then
         ip link set eth0 up || log_warn "Failed to bring up eth0 macvlan alias"
@@ -164,10 +179,12 @@ done
 # -----------------------------------------------------------------------------
 preseed_postgres() {
     local start_time=$SECONDS
-    log_info "Pre-seeding PostgreSQL databases..."
     
     local pg_data="/var/lib/postgresql/14/main"
     local pg_bin="/usr/lib/postgresql/14/bin"
+    local pg_log="/var/log/postgresql/preseed.log"
+    
+    mkdir -p /var/log/postgresql
     
     # Ensure data directory exists with correct permissions
     mkdir -p "$pg_data"
@@ -178,16 +195,20 @@ preseed_postgres() {
     # An empty mounted volume would pass directory check but fail to start.
     if [ ! -f "$pg_data/PG_VERSION" ]; then
         log_info "Initializing PostgreSQL cluster..."
-        if ! runuser -u postgres -- "$pg_bin/initdb" -D "$pg_data" 2>/dev/null; then
-            log_error "PostgreSQL initdb failed"
+        if ! runuser -u postgres -- "$pg_bin/initdb" -D "$pg_data" >> "$pg_log" 2>&1; then
+            log_error "PostgreSQL initdb failed (see $pg_log)"
             return 1
         fi
+        log_success "Cluster initialized"
+    else
+        log_success "Cluster exists"
     fi
     
     # Start PostgreSQL temporarily with shorter timeout (fail fast if broken)
+    log_info "Starting PostgreSQL..."
     if ! runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" \
-         -l /var/log/postgresql/startup.log start -w -t 30 2>/dev/null; then
-        log_warn "PostgreSQL temporary start failed, will retry pre-seed on next boot"
+         -l "$pg_log" start -w -t 30 >> "$pg_log" 2>&1; then
+        log_warn "PostgreSQL temporary start failed, will retry on next boot"
         return 1
     fi
     
@@ -202,10 +223,11 @@ preseed_postgres() {
     done
     
     if [ $retries -eq 0 ]; then
-        log_warn "PostgreSQL not accepting connections, will retry pre-seed on next boot"
-        runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast 2>/dev/null || true
+        log_warn "PostgreSQL not accepting connections, will retry on next boot"
+        runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast >> "$pg_log" 2>&1 || true
         return 1
     fi
+    log_success "PostgreSQL running"
     
     # -------------------------------------------------------------------------
     # Database and user configurations.
@@ -225,44 +247,43 @@ preseed_postgres() {
         "unifi-identity-update:unifi-identity-update"
     )
     
-    local missing=0
+    log_info "Creating databases..."
+    local created=0 existed=0 failed=0
+    
     for config in "${db_configs[@]}"; do
         local dbname="${config%%:*}"
         local owner="${config##*:}"
         
-        # Create user if not exists (ignore "already exists" errors)
-        runuser -u postgres -- "$pg_bin/psql" -c "CREATE USER \"$owner\";" 2>/dev/null || true
+        # Create user if not exists (suppress output)
+        runuser -u postgres -- "$pg_bin/psql" -c "CREATE USER \"$owner\";" >> "$pg_log" 2>&1 || true
         
         # Create database if not exists
-        if ! runuser -u postgres -- "$pg_bin/psql" -lqt | cut -d \| -f 1 | grep -qw "$dbname"; then
-            if runuser -u postgres -- "$pg_bin/createdb" -O "$owner" "$dbname" 2>/dev/null; then
-                log_info "  Created database: $dbname (owner: $owner)"
+        if ! runuser -u postgres -- "$pg_bin/psql" -lqt | cut -d \| -f 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -Fxq "$dbname"; then
+            if runuser -u postgres -- "$pg_bin/createdb" -O "$owner" "$dbname" >> "$pg_log" 2>&1; then
+                created=$((created + 1))
             else
-                log_error "  Failed to create database: $dbname"
-                missing=1
+                log_error "Failed: $dbname"
+                failed=$((failed + 1))
             fi
+        else
+            existed=$((existed + 1))
         fi
         
-        # Verify database exists after creation attempt
-        if ! runuser -u postgres -- "$pg_bin/psql" -lqt | cut -d \| -f 1 | grep -qw "$dbname"; then
-            log_error "  Database verification failed: $dbname does not exist"
-            missing=1
-        fi
-        
-        # Grant privileges (idempotent)
-        runuser -u postgres -- "$pg_bin/psql" -c "GRANT ALL PRIVILEGES ON DATABASE \"$dbname\" TO \"$owner\";" 2>/dev/null || true
+        # Grant privileges (suppress output)
+        runuser -u postgres -- "$pg_bin/psql" -c "GRANT ALL PRIVILEGES ON DATABASE \"$dbname\" TO \"$owner\";" >> "$pg_log" 2>&1 || true
     done
     
     # Stop PostgreSQL - systemd will start it properly
-    runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast 2>/dev/null || true
+    runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast >> "$pg_log" 2>&1 || true
     
-    if [ "$missing" -ne 0 ]; then
-        log_error "PostgreSQL pre-seeding incomplete: one or more databases failed"
+    local elapsed=$((SECONDS - start_time))
+    
+    if [ "$failed" -gt 0 ]; then
+        log_error "Databases: $created new, $existed existing, $failed failed (${elapsed}s)"
         return 1
     fi
     
-    local elapsed=$((SECONDS - start_time))
-    log_info "PostgreSQL pre-seeding complete (${elapsed}s)"
+    log_success "Databases: $created new, $existed existing (${elapsed}s)"
 }
 
 # Preseed marker is versioned to allow re-seeding on image upgrades.
@@ -277,12 +298,16 @@ mkdir -p "$PG_DATA"
 chown postgres:postgres "$PG_DATA"
 
 if [ ! -f "$PRESEED_MARKER" ]; then
+    log_section "PostgreSQL Setup"
     if preseed_postgres; then
         touch "$PRESEED_MARKER"
         chown postgres:postgres "$PRESEED_MARKER"
     else
-        log_warn "PostgreSQL pre-seeding incomplete; marker not written"
+        log_warn "Pre-seeding incomplete; marker not written"
     fi
+else
+    log_section "PostgreSQL Setup"
+    log_success "Already initialized (skipped)"
 fi
 
 # Apply Synology patches
@@ -317,13 +342,12 @@ if { [ -f "$SYS_VENDOR" ] && grep -qs "Synology" "$SYS_VENDOR"; } \
         echo "Type=simple"
     } > /etc/systemd/system/ulp-go.service.d/override.conf
 
-    log_info "Synology patches applied!"
+    log_success "Synology patches applied"
 fi
 
 # Set UOS_SYSTEM_IP for device adoption
 UNIFI_SYSTEM_PROPERTIES="/var/lib/unifi/system.properties"
 if [ -n "${UOS_SYSTEM_IP+1}" ] && [ -n "$UOS_SYSTEM_IP" ]; then
-    log_info "Setting UOS_SYSTEM_IP to $UOS_SYSTEM_IP"
     validate_system_ip "$UOS_SYSTEM_IP"
     mkdir -p "$(dirname "$UNIFI_SYSTEM_PROPERTIES")"
     if [ ! -f "$UNIFI_SYSTEM_PROPERTIES" ]; then
@@ -339,7 +363,12 @@ if [ -n "${UOS_SYSTEM_IP+1}" ] && [ -n "$UOS_SYSTEM_IP" ]; then
             printf 'system_ip=%s\n' "$UOS_SYSTEM_IP" >> "$UNIFI_SYSTEM_PROPERTIES"
         fi
     fi
+    log_success "System IP: $UOS_SYSTEM_IP"
 fi
+
+log_section "Starting Services"
+log_info "Handing off to systemd..."
+echo ""
 
 # Start systemd
 exec /sbin/init
