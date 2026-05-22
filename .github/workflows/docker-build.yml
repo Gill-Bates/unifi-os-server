@@ -113,7 +113,7 @@ jobs:
             exit 1
           fi
 
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Built version: ${VERSION}"
 
       - name: Trivy vulnerability scan (amd64)
@@ -194,7 +194,7 @@ jobs:
             exit 1
           fi
 
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Trivy vulnerability scan (arm64)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

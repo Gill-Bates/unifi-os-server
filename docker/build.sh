@@ -424,7 +424,6 @@ fetch_urls_from_api() {
         jq -r '
           .downloads
           | map(select(.name | test("Linux.*(x64|arm64)"; "i")))
-          | sort_by(.version)
           | group_by(.version)
           | map({
               version: .[0].version,
@@ -542,7 +541,7 @@ build_extractor_image() {
     local arch="$1"
     local installer_url="$2"
     local __out="$3"
-    local extractor_tag="uos-extractor:${VERSION}-${arch}"
+    local extractor_image_tag="uos-extractor:${VERSION}-${arch}"
 
     log "Phase 1: Building extractor image for linux/${arch}"
     
@@ -551,12 +550,12 @@ build_extractor_image() {
         --platform "linux/${arch}" \
         --pull \
         --file "${REPO_ROOT}/docker/Dockerfile.extractor" \
-        --tag "$extractor_tag" \
+        --tag "$extractor_image_tag" \
         "$REPO_ROOT" >&2; then
         fatal "Failed to build extractor image"
     fi
 
-    printf -v "$__out" '%s' "$extractor_tag"
+    printf -v "$__out" '%s' "$extractor_image_tag"
 }
 
 #######################################
@@ -565,8 +564,9 @@ build_extractor_image() {
 
 run_extraction() {
     local arch="$1"
-    local extractor_tag="$2"
-    local __out="$3"
+    local installer_url="$2"
+    local extractor_tag="$3"
+    local __out="$4"
     local container_name="uos-extract-${arch}-$$"
     local output_dir="${BUILD_ARTIFACTS_DIR}/extract-${arch}"
 
@@ -802,7 +802,7 @@ build_runtime_image() {
     local arch="$1"
     local uosserver_tag="$2"
     local __out="$3"
-    local final_tag="${IMAGE_NAME}:${VERSION}-${arch}"
+    local runtime_image_tag="${IMAGE_NAME}:${VERSION}-${arch}"
 
     [[ -n "$uosserver_tag" ]] || fatal "UOSSERVER_IMAGE must be set"
     [[ -n "$VERSION" && "$VERSION" != "dev" ]] || fatal "APP_VERSION must be a real release version"
@@ -817,7 +817,7 @@ build_runtime_image() {
         --platform "linux/${arch}" \
         --load \
         --file "${REPO_ROOT}/docker/Dockerfile.runtime" \
-        --tag "$final_tag" \
+        --tag "$runtime_image_tag" \
         --build-arg "UOSSERVER_IMAGE=${uosserver_tag}" \
         --build-arg "APP_VERSION=${VERSION}" \
         --build-arg "BUILD_DATE=${BUILD_DATE}" \
@@ -826,11 +826,11 @@ build_runtime_image() {
     fi
 
     local image_size
-    image_size=$(docker image inspect --format '{{.Size}}' "$final_tag" 2>/dev/null || echo "0")
-    log "Built runtime image: $final_tag ($((image_size / 1024 / 1024))MB)"
+    image_size=$(docker image inspect --format '{{.Size}}' "$runtime_image_tag" 2>/dev/null || echo "0")
+    log "Built runtime image: $runtime_image_tag ($((image_size / 1024 / 1024))MB)"
 
-    arch_image_tags+=("$final_tag")
-    printf -v "$__out" '%s' "$final_tag"
+    arch_image_tags+=("$runtime_image_tag")
+    printf -v "$__out" '%s' "$runtime_image_tag"
 }
 
 tag_local_aliases() {
@@ -859,7 +859,7 @@ validate_runtime_image() {
     local image_tag="$2"
     local __out="$3"
     local container_name="uos-validate-${arch}-$$"
-    local validation_result="passed"
+    local validation_state="passed"
 
     log "Phase 5: Validating runtime image"
     log "  Image: $image_tag"
@@ -931,7 +931,7 @@ validate_runtime_image() {
 
     if [[ "$systemd_state" != "running" && "$systemd_state" != "degraded" ]]; then
         warn "  systemd did not reach running state within ${timeout}s (state: $systemd_state)"
-        validation_result="degraded"
+        validation_state="degraded"
     fi
 
     # --- Check 2: Verify critical services ---
@@ -1003,7 +1003,7 @@ validate_runtime_image() {
 
     if [[ "$systemd_state" != "running" && "$systemd_state" != "degraded" ]]; then
         warn "  ✗ systemd not ready after restart"
-        validation_result="degraded"
+        validation_state="degraded"
     fi
 
     # Show running services summary
@@ -1015,10 +1015,10 @@ validate_runtime_image() {
     docker rm -f "$container_name" >/dev/null 2>&1 || true
     remove_from_cleanup "$container_name"
 
-    log "Validation complete (result: $validation_result)"
+    log "Validation complete (result: $validation_state)"
     
     # Return validation result for provenance
-    printf -v "$__out" '%s' "$validation_result"
+    printf -v "$__out" '%s' "$validation_state"
 }
 
 #######################################
@@ -1106,7 +1106,7 @@ build_arch_image() {
     }
 
     # Phase 2: Run extraction
-    run_extraction "$arch" "$extractor_tag" uosserver_tar || {
+    run_extraction "$arch" "$installer_url" "$extractor_tag" uosserver_tar || {
         fatal "Phase 2 (run extraction) failed for ${arch}"
     }
 
