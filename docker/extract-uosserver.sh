@@ -90,7 +90,7 @@ log "Installer process finished with exit code: $installer_status"
 
 # Wait for any remaining podman processes (installer may spawn background jobs)
 log "Waiting for background podman processes..."
-for i in {1..30}; do
+for i in {1..60}; do
     PODMAN_PROCS=$(pgrep -c podman 2>/dev/null) || PODMAN_PROCS=0
     if (( PODMAN_PROCS == 0 )); then
         log "No more podman processes running"
