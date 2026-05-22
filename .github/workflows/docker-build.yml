@@ -177,6 +177,47 @@ jobs:
             echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      - name: Smoke test amd64 image
+        run: |
+          VERSION="${{ steps.build.outputs.version }}"
+          IMAGE="${IMAGE_NAME}:${VERSION}-amd64"
+          echo "Running smoke test for $IMAGE..."
+          
+          # Start container in background
+          CONTAINER_ID=$(docker run -d --name smoke-test-amd64 \
+            -e SKIP_SERVICES=true \
+            "$IMAGE" sleep 30)
+          
+          echo "Container started: $CONTAINER_ID"
+          
+          # Give container time to initialize
+          sleep 3
+          
+          # Check container is running
+          if ! docker ps --filter "id=$CONTAINER_ID" --format '{{.Status}}' | grep -q "Up"; then
+            echo "ERROR: Container failed to start"
+            docker logs smoke-test-amd64 || true
+            docker rm -f smoke-test-amd64 || true
+            exit 1
+          fi
+          
+          # Verify key files exist
+          echo "Checking container filesystem..."
+          docker exec smoke-test-amd64 test -f /usr/share/unifi-os/uos-server.jar || {
+            echo "ERROR: uos-server.jar not found"
+            docker rm -f smoke-test-amd64 || true
+            exit 1
+          }
+          
+          docker exec smoke-test-amd64 test -x /usr/bin/java || {
+            echo "ERROR: java not executable"
+            docker rm -f smoke-test-amd64 || true
+            exit 1
+          }
+          
+          echo "Smoke test passed!"
+          docker rm -f smoke-test-amd64 || true
+
       - name: Check amd64 tag existence
         if: github.event.inputs.push != 'false'
         id: check_amd64
@@ -316,6 +357,47 @@ jobs:
           else
             echo "$SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Smoke test arm64 image
+        run: |
+          VERSION="${{ steps.build.outputs.version }}"
+          IMAGE="${IMAGE_NAME}:${VERSION}-arm64"
+          echo "Running smoke test for $IMAGE..."
+          
+          # Start container in background
+          CONTAINER_ID=$(docker run -d --name smoke-test-arm64 \
+            -e SKIP_SERVICES=true \
+            "$IMAGE" sleep 30)
+          
+          echo "Container started: $CONTAINER_ID"
+          
+          # Give container time to initialize
+          sleep 3
+          
+          # Check container is running
+          if ! docker ps --filter "id=$CONTAINER_ID" --format '{{.Status}}' | grep -q "Up"; then
+            echo "ERROR: Container failed to start"
+            docker logs smoke-test-arm64 || true
+            docker rm -f smoke-test-arm64 || true
+            exit 1
+          fi
+          
+          # Verify key files exist
+          echo "Checking container filesystem..."
+          docker exec smoke-test-arm64 test -f /usr/share/unifi-os/uos-server.jar || {
+            echo "ERROR: uos-server.jar not found"
+            docker rm -f smoke-test-arm64 || true
+            exit 1
+          }
+          
+          docker exec smoke-test-arm64 test -x /usr/bin/java || {
+            echo "ERROR: java not executable"
+            docker rm -f smoke-test-arm64 || true
+            exit 1
+          }
+          
+          echo "Smoke test passed!"
+          docker rm -f smoke-test-arm64 || true
 
       - name: Check arm64 tag existence
         if: github.event.inputs.push != 'false'
