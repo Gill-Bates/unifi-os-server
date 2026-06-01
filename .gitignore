@@ -2,3 +2,8 @@ uos*/
 unifi-os-server.conf
 *.har
 unifi-os-server.xml
+.omx/
+full_codebase*
+.env
+data/
+*.tar

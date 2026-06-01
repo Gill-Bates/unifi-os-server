@@ -18,8 +18,6 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     tmpfs:
       - /run:exec
       - /run/lock
@@ -27,10 +25,11 @@ services:
       - /var/lib/journal
       - /var/opt/unifi/tmp:size=64m
     environment:
-      # Hostname or IP for device adoption (required for remote management)
-      - UOS_SYSTEM_IP=unifi.example.com
-      # Optional: Set to 'synology' if running on Synology NAS
-      # - HARDWARE_PLATFORM=synology
+      # Set these in `.env` or your shell before `docker compose up`.
+      # Required for remote adoption: a reachable hostname or IP.
+      UOS_SYSTEM_IP: ${UOS_SYSTEM_IP:-}
+      # Optional: set to `synology` if running on Synology NAS.
+      HARDWARE_PLATFORM: ${HARDWARE_PLATFORM:-}
     volumes:
       # Required: cgroup mount for systemd
       - /sys/fs/cgroup:/sys/fs/cgroup:rw

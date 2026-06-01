@@ -43,15 +43,6 @@ on:
         options:
           - 'true'
           - 'false'
-      allow_overwrite:
-        description: 'Allow overwriting existing Docker tags'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-
 env:
   REGISTRY: docker.io
   IMAGE_NAME: giiibates/unifi-os-server
@@ -206,7 +197,7 @@ jobs:
             ls -d /var/lib/*unifi* 2>/dev/null || echo "No /var/lib/*unifi*"
             
             echo "=== JAR files (first 5) ==="
-            find / -name "*.jar" -type f 2>/dev/null | head -5 || echo "No JAR files"
+            find /usr /opt /var/lib -name "*.jar" -type f 2>/dev/null | head -5 || echo "No JAR files"
             
             echo "=== Systemd services ==="
             ls /lib/systemd/system/*.service 2>/dev/null | grep -i unifi | head -5 || \
@@ -216,30 +207,11 @@ jobs:
             echo "Smoke test passed!"
           '
 
-      - name: Check amd64 tag existence
-        if: github.event.inputs.push != 'false'
-        id: check_amd64
-        run: |
-          VERSION="${{ steps.build.outputs.version }}"
-          TAG="${IMAGE_NAME}:${VERSION}-amd64"
-          if docker manifest inspect "$TAG" > /dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Tag $TAG already exists in registry"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Tag $TAG does not exist yet"
-          fi
-
       - name: Push amd64 image
-        if: github.event.inputs.push != 'false' && (steps.check_amd64.outputs.exists != 'true' || github.event.inputs.allow_overwrite == 'true')
+        if: github.event.inputs.push != 'false'
         run: |
           VERSION="${{ steps.build.outputs.version }}"
           docker push "${IMAGE_NAME}:${VERSION}-amd64"
-
-      - name: Skip push (tag exists)
-        if: github.event.inputs.push != 'false' && steps.check_amd64.outputs.exists == 'true' && github.event.inputs.allow_overwrite != 'true'
-        run: |
-          echo "::warning::Skipping push: ${IMAGE_NAME}:${{ steps.build.outputs.version }}-amd64 already exists. Set allow_overwrite=true to force."
 
   build-arm64:
     name: Build arm64 image
@@ -386,7 +358,7 @@ jobs:
             ls -d /var/lib/*unifi* 2>/dev/null || echo "No /var/lib/*unifi*"
             
             echo "=== JAR files (first 5) ==="
-            find / -name "*.jar" -type f 2>/dev/null | head -5 || echo "No JAR files"
+            find /usr /opt /var/lib -name "*.jar" -type f 2>/dev/null | head -5 || echo "No JAR files"
             
             echo "=== Systemd services ==="
             ls /lib/systemd/system/*.service 2>/dev/null | grep -i unifi | head -5 || \
@@ -396,30 +368,11 @@ jobs:
             echo "Smoke test passed!"
           '
 
-      - name: Check arm64 tag existence
-        if: github.event.inputs.push != 'false'
-        id: check_arm64
-        run: |
-          VERSION="${{ steps.build.outputs.version }}"
-          TAG="${IMAGE_NAME}:${VERSION}-arm64"
-          if docker manifest inspect "$TAG" > /dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Tag $TAG already exists in registry"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Tag $TAG does not exist yet"
-          fi
-
       - name: Push arm64 image
-        if: github.event.inputs.push != 'false' && (steps.check_arm64.outputs.exists != 'true' || github.event.inputs.allow_overwrite == 'true')
+        if: github.event.inputs.push != 'false'
         run: |
           VERSION="${{ steps.build.outputs.version }}"
           docker push "${IMAGE_NAME}:${VERSION}-arm64"
-
-      - name: Skip push (tag exists)
-        if: github.event.inputs.push != 'false' && steps.check_arm64.outputs.exists == 'true' && github.event.inputs.allow_overwrite != 'true'
-        run: |
-          echo "::warning::Skipping push: ${IMAGE_NAME}:${{ steps.build.outputs.version }}-arm64 already exists. Set allow_overwrite=true to force."
 
   create-manifest:
     name: Create multi-arch manifest
@@ -437,21 +390,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Check manifest tag existence
-        id: check_manifest
-        run: |
-          VERSION="${{ needs.build-amd64.outputs.version }}"
-          TAG="${IMAGE_NAME}:${VERSION}"
-          if docker manifest inspect "$TAG" > /dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Manifest tag $TAG already exists in registry"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Manifest tag $TAG does not exist yet"
-          fi
-
       - name: Create and push manifest
-        if: steps.check_manifest.outputs.exists != 'true' || github.event.inputs.allow_overwrite == 'true'
         run: |
           AMD_VERSION="${{ needs.build-amd64.outputs.version }}"
           ARM_VERSION="${{ needs.build-arm64.outputs.version }}"
@@ -483,6 +422,9 @@ jobs:
           
           echo "Creating manifest with: ${IMAGES[*]}"
           
+          docker manifest rm "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1 || true
+          docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
+
           # Create version manifest
           docker manifest create "${IMAGE_NAME}:${VERSION}" "${IMAGES[@]}" --amend
           docker manifest push "${IMAGE_NAME}:${VERSION}"
@@ -494,11 +436,6 @@ jobs:
           echo "Pushed manifests:"
           echo "  ${IMAGE_NAME}:${VERSION}"
           echo "  ${IMAGE_NAME}:latest"
-
-      - name: Skip manifest (tag exists)
-        if: steps.check_manifest.outputs.exists == 'true' && github.event.inputs.allow_overwrite != 'true'
-        run: |
-          echo "::warning::Skipping manifest push: ${IMAGE_NAME}:${{ needs.build-amd64.outputs.version }} already exists. Set allow_overwrite=true to force."
 
   create-release:
     name: Create GitHub Release
@@ -512,11 +449,15 @@ jobs:
     steps:
       - name: Create or update GitHub Release
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          VERSION: ${{ needs.build-amd64.outputs.version }}
+          TRIVY_AMD64: ${{ needs.build-amd64.outputs.trivy_summary }}
+          TRIVY_ARM64: ${{ needs.build-arm64.outputs.trivy_summary }}
         with:
           script: |
-            const version = '${{ needs.build-amd64.outputs.version }}';
-            const trivyAmd64 = '${{ needs.build-amd64.outputs.trivy_summary }}' || 'Scan not available';
-            const trivyArm64 = '${{ needs.build-arm64.outputs.trivy_summary }}' || 'Scan not available';
+            const version = process.env.VERSION;
+            const trivyAmd64 = process.env.TRIVY_AMD64 || 'Scan not available';
+            const trivyArm64 = process.env.TRIVY_ARM64 || 'Scan not available';
             const imageName = 'giiibates/unifi-os-server';
             const runId = context.runId;
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
@@ -542,11 +483,11 @@ jobs:
                 const amd = artifacts.find((a) => a && a.name === 'trivy-findings-amd64');
                 const arm = artifacts.find((a) => a && a.name === 'trivy-findings-arm64');
 
-                if (amd && amd.id) {
-                  findings.amd64 = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}/artifacts/${amd.id}`;
+                if (amd) {
+                  findings.amd64 = `${runUrl}#artifacts`;
                 }
-                if (arm && arm.id) {
-                  findings.arm64 = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}/artifacts/${arm.id}`;
+                if (arm) {
+                  findings.arm64 = `${runUrl}#artifacts`;
                 }
               } catch (e) {
                 console.warn(`Failed to resolve Trivy artifact links: ${e.message}`);
