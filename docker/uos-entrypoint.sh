@@ -4,33 +4,53 @@
 set -e
 
 # -----------------------------------------------------------------------------
+# Colors & Formatting
+# -----------------------------------------------------------------------------
+if [ -t 1 ] || [ "${FORCE_COLOR:-}" = "1" ]; then
+    C_RESET="\033[0m"
+    C_BOLD="\033[1m"
+    C_DIM="\033[2m"
+    C_BLUE="\033[38;5;33m"
+    C_CYAN="\033[38;5;45m"
+    C_GREEN="\033[38;5;35m"
+    C_YELLOW="\033[38;5;214m"
+    C_RED="\033[38;5;196m"
+    C_WHITE="\033[97m"
+    C_GRAY="\033[38;5;244m"
+else
+    C_RESET="" C_BOLD="" C_DIM="" C_BLUE="" C_CYAN=""
+    C_GREEN="" C_YELLOW="" C_RED="" C_WHITE="" C_GRAY=""
+fi
+
+# -----------------------------------------------------------------------------
 # Banner
 # -----------------------------------------------------------------------------
-cat << 'EOF'
-
-             _  __ _
- _   _ _ __ (_)/ _(_)   ___  ___   ___  ___ _ ____   _____ _ __
-| | | | '_ \| | |_| |  / _ \/ __| / __|/ _ \ '__\ \ / / _ \ '__|
-| |_| | | | | |  _| | | (_) \__ \ \__ \  __/ |   \ V /  __/ |
- \__,_|_| |_|_|_| |_|  \___/|___/ |___/\___|_|    \_/ \___|_|
-
-         https://github.com/Gill-Bates/unifi-os-server
-
-EOF
+printf "${C_BLUE}${C_BOLD}"
+cat << 'BANNER'
+             _    ___ _                                                     
+            (_)  / __|_)                                                    
+ _   _ ____  _ _| |__ _     ___   ___     ___ _____  ____ _   _ _____  ____ 
+| | | |  _ \| (_   __) |   / _ \ /___)   /___) ___ |/ ___) | | | ___ |/ ___)
+| |_| | | | | | | |  | |  | |_| |___ |  |___ | ____| |    \ V /| ____| |    
+|____/|_| |_|_| |_|  |_|   \___/(___/   (___/|_____)_|     \_/ |_____)_|    
+BANNER
+printf "${C_RESET}"
+printf "  ${C_GRAY}────────────────────────────────────────────────────${C_RESET}\n"
+printf "  ${C_DIM}UniFi OS Server${C_RESET}  ${C_CYAN}https://github.com/Gill-Bates/unifi-os-server${C_RESET}\n"
+printf "  ${C_GRAY}────────────────────────────────────────────────────${C_RESET}\n\n"
 
 # -----------------------------------------------------------------------------
 # Logging helpers with timestamps for better observability
 # -----------------------------------------------------------------------------
-log_section() { 
+log_section() {
     echo ""
-    echo "┌─────────────────────────────────────────────────────────────────────────┐"
-    printf "│  %-71s │\n" "$*"
-    echo "└─────────────────────────────────────────────────────────────────────────┘"
+    printf "  ${C_BLUE}${C_BOLD}▶ %s${C_RESET}\n" "$*"
+    printf "  ${C_GRAY}──────────────────────────────────────────────${C_RESET}\n"
 }
-log_info()    { printf "  ├─ %s\n" "$*"; }
-log_success() { printf "  │  ✓ %s\n" "$*"; }
-log_warn()    { printf "  │  ⚠ %s\n" "$*" >&2; }
-log_error()   { printf "  │  ✗ %s\n" "$*" >&2; }
+log_info()    { printf "  ${C_WHITE}  %s${C_RESET}\n" "$*"; }
+log_success() { printf "  ${C_GREEN}  ✔ %s${C_RESET}\n" "$*"; }
+log_warn()    { printf "  ${C_YELLOW}  ⚠ %s${C_RESET}\n" "$*" >&2; }
+log_error()   { printf "  ${C_RED}  ✖ %s${C_RESET}\n" "$*" >&2; }
 
 # -----------------------------------------------------------------------------
 # DRY helper for directory initialization
@@ -224,7 +244,7 @@ preseed_postgres() {
         log_warn "PostgreSQL temporary start failed, will retry on next boot"
         log_warn "Likely causes: invalid pgdata, missing runtime dirs, or permission mismatch"
         log_warn "Last PostgreSQL preseed log lines:"
-        tail -n 20 "$pg_log" 2>/dev/null | sed 's/^/  │    /' >&2 || true
+        tail -n 20 "$pg_log" 2>/dev/null | sed 's/^/       /' >&2 || true
         return 1
     fi
     
@@ -384,7 +404,7 @@ fi
 
 log_section "Starting Services"
 log_info "Handing off to systemd..."
-echo ""
+printf "\n  ${C_GRAY}──────────────────────────────────────────────${C_RESET}\n\n"
 
 # Start systemd
 exec /sbin/init

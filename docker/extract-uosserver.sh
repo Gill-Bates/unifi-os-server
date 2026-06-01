@@ -2,10 +2,18 @@
 # Runs inside the extractor container to:
 # 1. Download and run the Ubiquiti installer.
 # 2. Export the extracted uosserver image to /output/uosserver.tar.
-set -e
+
+# Redirect all output to the bind-mounted volume immediately.
+# /output is mounted from the host (docker run -v host/path:/output).
+# This log survives even a crash before the first docker-logs write - the
+# kernel flushes the tee subprocess on container exit.
+OUTPUT_DIR="/output"
+mkdir -p "$OUTPUT_DIR" 2>/dev/null || true
+exec > >(tee -a "${OUTPUT_DIR}/extract.log") 2>&1
+
+set -euo pipefail
 
 INSTALLER_PATH="/opt/uos/installer/uos-installer"
-OUTPUT_DIR="/output"
 MIN_EXPORT_SIZE_MB=500
 TEMP_EXTRACT=""
 
@@ -100,9 +108,9 @@ if [[ ! -x "$INSTALLER_PATH" ]]; then
 fi
 
 log "Running installer (expect it to fail at container startup)..."
-"$INSTALLER_PATH" --non-interactive --force-install &
+"$INSTALLER_PATH" --non-interactive --force-install >> "${OUTPUT_DIR}/installer.log" 2>&1 &
 INSTALLER_PID=$!
-log "Installer started (PID: $INSTALLER_PID)"
+log "Installer started (PID: $INSTALLER_PID) — output: ${OUTPUT_DIR}/installer.log"
 
 log "Waiting for podman storage to be created..."
 STORAGE_PATHS=(

@@ -75,6 +75,10 @@ BUILD_ARTIFACTS_DIR="${BUILD_ARTIFACTS_DIR:-/tmp/uos-build-$$}"
 DOWNLOAD_API_URL="${DOWNLOAD_API_URL:-https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server}"
 PRESERVE_FAILURE_CONTAINERS="${PRESERVE_FAILURE_CONTAINERS:-true}"
 
+# Minimum tar size for a valid uosserver image (MB).
+# Real images are >1500MB; this threshold catches truncated/empty extractions.
+MIN_TAR_SIZE_MB=500
+
 # BUILD_DATE should be set externally for reproducible builds
 if [[ -z "${BUILD_DATE:-}" ]]; then
     BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -252,6 +256,43 @@ preserve_failure() {
     # Save logs (full, not truncated)
     diag "Saving container logs..."
     docker logs "$container_name" > "${prefix}-stdout.log" 2> "${prefix}-stderr.log" || true
+
+    # If both logs are empty, the container likely crashed before producing output.
+    # Check the bind-mounted extract.log first — it's written before docker logging
+    # initialises and therefore survives sub-100ms crashes.
+    if [[ ! -s "${prefix}-stdout.log" && ! -s "${prefix}-stderr.log" ]]; then
+        warn "Container logs are empty (container likely crashed before producing output)"
+
+        # Try to recover the bind-mounted extract.log (survives any crash timing)
+        local extract_log="${BUILD_ARTIFACTS_DIR}/extract-${arch}/extract.log"
+        if [[ -s "$extract_log" ]]; then
+            cp "$extract_log" "${prefix}-extract.log" 2>/dev/null || true
+            warn "--- extract.log (last 50 lines) ---"
+            tail -50 "${prefix}-extract.log" >&2 || true
+            warn "--- end extract.log ---"
+        else
+            # Also try copying directly from the stopped container filesystem
+            docker cp "${container_name}:/output/extract.log" "${prefix}-extract.log" >/dev/null 2>&1 || true
+            if [[ -s "${prefix}-extract.log" ]]; then
+                warn "--- extract.log from container (last 50 lines) ---"
+                tail -50 "${prefix}-extract.log" >&2 || true
+                warn "--- end extract.log ---"
+            fi
+        fi
+
+        {
+            echo "=== Container logs were empty ==="
+            echo "This usually means the process crashed at startup (exec format error,"
+            echo "missing interpreter, immediate set -euo pipefail failure, or cgroup/namespace issue)."
+            echo ""
+            echo "Exit code: $(get_container_exit_code "$container_name")"
+            echo "Started at: $(get_container_started_at "$container_name")"
+            echo "Finished at: $(get_container_finished_at "$container_name")"
+            echo ""
+            echo "=== Container state (JSON) ==="
+            docker inspect --format '{{json .State}}' "$container_name" 2>/dev/null | jq . 2>/dev/null || true
+        } > "${prefix}-crash-diagnostic.txt"
+    fi
 
     # Save filesystem only if explicitly requested (can be multi-GB and slow)
     local state
@@ -647,7 +688,7 @@ run_extraction() {
                     prev_size2=$current_size
                     current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
                     
-                    if (( current_size == prev_size && current_size == prev_size2 && current_size > 500000000 )); then
+                    if (( current_size == prev_size && current_size == prev_size2 && current_size > MIN_TAR_SIZE_MB * 1024 * 1024 )); then
                         # Also verify the extraction script has finished
                         if docker logs --tail 5 "$container_name" 2>&1 | grep -q "Extraction complete!"; then
                             log "Extraction artifact found while container running (size stable at $((current_size / 1024 / 1024))MB)"
@@ -695,6 +736,11 @@ run_extraction() {
                         success=true
                     else
                         print_container_state "$container_name"
+                        # Dump container logs directly to stderr for immediate CI visibility
+                        # (preserve_failure saves them to files, but CI output is checked first)
+                        warn "--- Container output (last 50 lines) ---"
+                        docker logs --tail 50 "$container_name" >&2 2>&1 || true
+                        warn "--- End container output ---"
                         preserve_failure "$container_name" "$arch" "extraction" "Exited with code $exit_code, no artifact"
                         fatal "Extraction failed: container exited with code $exit_code and no uosserver.tar"
                     fi
@@ -746,13 +792,13 @@ run_extraction() {
     tar_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
     local tar_size_mb=$((tar_size / 1024 / 1024))
     
-    if (( tar_size_mb < 500 )); then
-        error "Extracted image is too small: ${tar_size_mb}MB (expected >1500MB)"
+    if (( tar_size_mb < MIN_TAR_SIZE_MB )); then
+        error "Extracted image is too small: ${tar_size_mb}MB (minimum: ${MIN_TAR_SIZE_MB}MB, typical: >1500MB)"
         error "This usually means the image import was not complete"
         preserve_failure "$container_name" "$arch" "extraction" "Image too small: ${tar_size_mb}MB"
         fatal "Extraction failed: incomplete image (${tar_size_mb}MB)"
     elif (( tar_size_mb < 1000 )); then
-        warn "Extracted image is smaller than expected: ${tar_size_mb}MB (expected >1500MB)"
+        warn "Extracted image is smaller than expected: ${tar_size_mb}MB (typical: >1500MB)"
     fi
 
     log "Extraction successful: ${output_dir}/uosserver.tar (${tar_size_mb}MB)"
@@ -779,8 +825,7 @@ load_extracted_image() {
 
     # Validate tar file before loading
     if [[ ! -f "$tar_path" ]]; then
-        error "Tar file does not exist: $tar_path"
-        return 1
+        fatal "Tar file does not exist: $tar_path"
     fi
     
     local tar_size_mb
@@ -793,10 +838,9 @@ load_extracted_image() {
     
     # docker-archive format should have manifest.json
     if ! tar -tf "$tar_path" 2>/dev/null | grep -q '^manifest.json$'; then
-        error "Tar is not in docker-archive format (missing manifest.json)"
         diag "Full tar listing:"
         tar -tf "$tar_path" 2>/dev/null | head -30 || true
-        return 1
+        fatal "Tar is not in docker-archive format (missing manifest.json)"
     fi
 
     # Capture images before load to determine what's new
@@ -806,11 +850,10 @@ load_extracted_image() {
     # Load the image
     local load_output
     load_output=$(docker load -i "$tar_path" 2>&1) || {
-        error "docker load failed"
         echo "$load_output" >&2
         diag "Tar structure for debugging:"
         tar -tvf "$tar_path" 2>/dev/null | head -20 || true
-        return 1
+        fatal "docker load failed"
     }
     echo "$load_output" >&2
 
@@ -822,19 +865,15 @@ load_extracted_image() {
     if [[ -n "$new_image" ]]; then
         # Found new image by ID comparison - most reliable method
         diag "Detected new image by ID: $new_image"
-        docker tag "$new_image" "$target_tag" || {
-            error "Failed to tag image $new_image as $target_tag"
-            return 1
-        }
+        docker tag "$new_image" "$target_tag" || \
+            fatal "Failed to tag image $new_image as $target_tag"
     else
         # Fallback: parse docker load output
         loaded_tag=$(echo "$load_output" | grep -oP 'Loaded image: \K.*' | head -1 || true)
         if [[ -n "$loaded_tag" ]]; then
             if [[ "$loaded_tag" != "$target_tag" ]]; then
-                docker tag "$loaded_tag" "$target_tag" || {
-                    error "Failed to tag $loaded_tag as $target_tag"
-                    return 1
-                }
+                docker tag "$loaded_tag" "$target_tag" || \
+                    fatal "Failed to tag $loaded_tag as $target_tag"
             fi
         else
             fatal "Failed to load image: could not identify loaded image"
@@ -903,8 +942,8 @@ tag_local_aliases() {
     local version_tag="${IMAGE_NAME}:${VERSION}"
     local latest_tag="${IMAGE_NAME}:latest"
 
-    docker tag "$source_tag" "$version_tag"
-    docker tag "$source_tag" "$latest_tag"
+    docker tag "$source_tag" "$version_tag" || fatal "Failed to tag $source_tag as $version_tag"
+    docker tag "$source_tag" "$latest_tag" || fatal "Failed to tag $source_tag as $latest_tag"
 
     log "Tagged local aliases: $version_tag, $latest_tag"
 }
@@ -1188,35 +1227,23 @@ build_arch_image() {
     local output_dir="${BUILD_ARTIFACTS_DIR}/extract-${arch}"
 
     # Phase 1: Build extractor
-    build_extractor_image "$arch" "$installer_url" extractor_tag || {
-        fatal "Phase 1 (build extractor) failed for ${arch}"
-    }
+    build_extractor_image "$arch" "$installer_url" extractor_tag
 
     # Phase 2: Run extraction
-    run_extraction "$arch" "$installer_url" "$extractor_tag" uosserver_tar || {
-        fatal "Phase 2 (run extraction) failed for ${arch}"
-    }
+    run_extraction "$arch" "$installer_url" "$extractor_tag" uosserver_tar
 
     # Phase 3: Load image
-    load_extracted_image "$arch" "$uosserver_tar" uosserver_tag || {
-        fatal "Phase 3 (load image) failed for ${arch}"
-    }
+    load_extracted_image "$arch" "$uosserver_tar" uosserver_tag
 
     # Phase 4: Build runtime
-    build_runtime_image "$arch" "$uosserver_tag" final_tag || {
-        fatal "Phase 4 (build runtime) failed for ${arch}"
-    }
+    build_runtime_image "$arch" "$uosserver_tag" final_tag
 
-    tag_local_aliases "$final_tag" || {
-        fatal "Failed to create local alias tags for ${arch}"
-    }
+    tag_local_aliases "$final_tag"
 
     # Phase 5: Validate (optional)
     local validation_result="skipped"
     if [[ "${SKIP_VALIDATION:-false}" != "true" ]]; then
-        validate_runtime_image "$arch" "$final_tag" validation_result || {
-            fatal "Phase 5 (validation) failed for ${arch}"
-        }
+        validate_runtime_image "$arch" "$final_tag" validation_result
     else
         warn "Skipping validation (SKIP_VALIDATION=true)"
     fi

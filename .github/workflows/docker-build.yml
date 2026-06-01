@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build & Push Docker Image
 
 on:
   workflow_dispatch:
@@ -456,8 +456,14 @@ jobs:
         with:
           script: |
             const version = process.env.VERSION;
+            const tagName = 'v' + version;
+            const sha = context.sha;
             const trivyAmd64 = process.env.TRIVY_AMD64 || 'Scan not available';
             const trivyArm64 = process.env.TRIVY_ARM64 || 'Scan not available';
+
+            if (!version) {
+              throw new Error('VERSION is empty - cannot create release');
+            }
             const imageName = 'giiibates/unifi-os-server';
             const runId = context.runId;
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
@@ -709,37 +715,76 @@ jobs:
               ...releaseNotesLines,
               '**Source:** [Ubiquiti Downloads](https://ui.com/download/software/unifi-os-server)'
             ].join('\n');
-            
+
+            // --- Idempotenz: Tag zuerst auf aktuellen Commit setzen/verschieben ---
+            async function upsertTag() {
+              const ref = `tags/${tagName}`;
+              try {
+                await github.rest.git.getRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref
+                });
+                // Tag existiert → force-move auf aktuellen Commit
+                await github.rest.git.updateRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref,
+                  sha,
+                  force: true
+                });
+                console.log(`Moved tag ${tagName} -> ${sha}`);
+              } catch (e) {
+                if (e.status === 404) {
+                  await github.rest.git.createRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: `refs/tags/${tagName}`,
+                    sha
+                  });
+                  console.log(`Created tag ${tagName} -> ${sha}`);
+                } else {
+                  throw e;
+                }
+              }
+            }
+
+            await upsertTag();
+
+            // --- Release erstellen oder vorhandenen ersetzen ---
             try {
               await github.rest.repos.createRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                tag_name: 'v' + version,
+                tag_name: tagName,
+                target_commitish: sha,
                 name: 'UniFi OS Server ' + version,
                 body: body,
                 draft: false,
-                prerelease: false
+                prerelease: false,
+                make_latest: 'true'
               });
-              console.log('Created release v' + version);
+              console.log('Created release ' + tagName);
             } catch (e) {
               if (e.status === 422) {
-                console.log('Release v' + version + ' already exists, updating...');
-                // Get existing release and update it
+                console.log('Release ' + tagName + ' already exists, updating...');
                 const { data: release } = await github.rest.repos.getReleaseByTag({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  tag: 'v' + version
+                  tag: tagName
                 });
                 await github.rest.repos.updateRelease({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   release_id: release.id,
+                  tag_name: tagName,
                   name: 'UniFi OS Server ' + version,
+                  body: body,
                   draft: false,
                   prerelease: false,
-                  body: body
+                  make_latest: 'true'
                 });
-                console.log('Updated release v' + version);
+                console.log('Updated release ' + tagName);
               } else {
                 throw e;
               }
