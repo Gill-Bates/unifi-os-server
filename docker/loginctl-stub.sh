@@ -1,10 +1,11 @@
 #!/bin/sh
 # Stub for loginctl to work without systemd running (for container builds)
 # Handles enable-linger by creating the linger file directly
+set -eu
 
 valid_user() {
     case "$1" in
-        ""|*/*|*..*|*[!A-Za-z0-9_.@-]*)
+        ""|-*|*/*|*..*|*[!A-Za-z0-9_.@-]*)
             echo "Invalid user: $1" >&2
             exit 1
             ;;
@@ -18,7 +19,7 @@ require_user() {
     fi
 }
 
-case "$1" in
+case "${1:-}" in
     enable-linger)
         user="${2:-}"
         require_user "$user"

@@ -96,6 +96,7 @@ arm64_url=""
 declare -a requested_platforms=()
 declare -a arch_image_tags=()
 declare -a cleanup_containers=()
+HOST_ARCH=""
 
 #######################################
 # LOGGING (all to stderr to not pollute stdout for return values)
@@ -183,7 +184,7 @@ print_container_state() {
 
     if ! container_exists "$container_name"; then
         diag "${prefix}Container '$container_name': does not exist"
-        return 1
+        return 0
     fi
 
     local state exit_code oom_killed error_msg started finished
@@ -264,13 +265,16 @@ preserve_failure() {
         diag "Skipping filesystem export (set EXPORT_FAILURE_FILESYSTEM=true to enable)"
     fi
 
+    # Extract stub logs even from stopped containers; /tmp may be tmpfs-backed.
+    docker cp "$container_name:/var/log/systemctl-stub.log" "${prefix}-systemctl-stub.log" >/dev/null 2>&1 || \
+        docker cp "$container_name:/tmp/systemctl-stub.log" "${prefix}-systemctl-stub.log" >/dev/null 2>&1 || true
+
     # Try to get inner podman state if possible
     if [[ "$state" == "running" ]]; then
         diag "Capturing inner podman state..."
         docker exec "$container_name" podman ps -a > "${prefix}-podman-ps.txt" 2>&1 || true
         docker exec "$container_name" podman images > "${prefix}-podman-images.txt" 2>&1 || true
         docker exec "$container_name" podman logs uosserver > "${prefix}-podman-uosserver.log" 2>&1 || true
-        docker exec "$container_name" cat /tmp/systemctl-stub.log > "${prefix}-systemctl-stub.log" 2>&1 || true
     fi
 
     warn "Failure artifacts saved to: ${prefix}*"
@@ -358,29 +362,44 @@ validate_api_url() {
 validate_installer_url() {
     local url="$1"
     local label="$2"
+    local host
 
     [[ "$url" =~ ^https://[^[:space:]]+$ ]] || fatal "Invalid $label URL: must be HTTPS without whitespace"
-    case "$url" in
-        https://*.ui.com/*|https://ui.com/*|https://dl.ui.com/*|https://fw-download.ubnt.com/*) ;;
-        *) fatal "Invalid $label URL host: $url" ;;
+
+    host="${url#https://}"
+    host="${host%%/*}"
+    host="${host%%:*}"
+
+    case "$host" in
+        ui.com|dl.ui.com|fw-download.ubnt.com)
+            ;;
+        *.ui.com)
+            [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.ui\.com$ ]] || \
+                fatal "Invalid $label URL host: $host"
+            ;;
+        *)
+            fatal "Invalid $label URL host: $host"
+            ;;
     esac
 }
 
-host_arch() {
-    case "$(uname -m)" in
-        x86_64|amd64) printf 'amd64\n' ;;
-        aarch64|arm64) printf 'arm64\n' ;;
-        *) fatal "Unsupported host architecture: $(uname -m)" ;;
+init_host_arch() {
+    local uname_arch
+    uname_arch="$(uname -m)"
+
+    case "$uname_arch" in
+        x86_64|amd64) HOST_ARCH="amd64" ;;
+        aarch64|arm64) HOST_ARCH="arm64" ;;
+        *) fatal "Unsupported host architecture: $uname_arch" ;;
     esac
 }
 
 # Check if QEMU/binfmt is available for cross-architecture builds
 can_emulate_arch() {
     local target_arch="$1"
-    local host="$(host_arch)"
     
     # Native architecture always works
-    [[ "$target_arch" == "$host" ]] && return 0
+    [[ "$target_arch" == "$HOST_ARCH" ]] && return 0
     
     # Check binfmt_misc for the target architecture
     local binfmt_path="/proc/sys/fs/binfmt_misc"
@@ -403,6 +422,8 @@ can_emulate_arch() {
     
     return 1
 }
+
+init_host_arch
 
 #######################################
 # URL CONFIGURATION
@@ -503,7 +524,6 @@ load_config() {
 }
 
 validate_requested_platforms() {
-    local host="$(host_arch)"
     for platform in "${requested_platforms[@]}"; do
         local requested_arch="${platform#linux/}"
         case "$requested_arch" in
@@ -519,12 +539,12 @@ validate_requested_platforms() {
         esac
         
         # Check cross-architecture emulation
-        if [[ "$requested_arch" != "$host" ]]; then
+        if [[ "$requested_arch" != "$HOST_ARCH" ]]; then
             if ! can_emulate_arch "$requested_arch"; then
-                fatal "Cannot build for $requested_arch on $host host - QEMU not available.
+                fatal "Cannot build for $requested_arch on $HOST_ARCH host - QEMU not available.
 Install QEMU with: docker run --privileged --rm tonistiigi/binfmt --install all"
             fi
-            warn "Cross-architecture build: $requested_arch on $host (using QEMU emulation)"
+            warn "Cross-architecture build: $requested_arch on $HOST_ARCH (using QEMU emulation)"
         fi
     done
 }
@@ -1016,9 +1036,15 @@ validate_runtime_image() {
     # --- Check 4: Restart test ---
     # Verify container survives a stop/start cycle (proves persistent state)
     log "Check 4/4: Restart test..."
-    docker stop -t 30 "$container_name" >/dev/null 2>&1
+    if ! docker stop -t 30 "$container_name" >/dev/null 2>&1; then
+        preserve_failure "$container_name" "$arch" "validation" "docker stop failed during restart test"
+        fatal "Validation failed: could not stop container for restart test"
+    fi
     sleep 2
-    docker start "$container_name" >/dev/null 2>&1
+    if ! docker start "$container_name" >/dev/null 2>&1; then
+        preserve_failure "$container_name" "$arch" "validation" "docker start failed during restart test"
+        fatal "Validation failed: could not restart container"
+    fi
     sleep 10  # Give systemd time to reinitialize
 
     state=$(get_container_state "$container_name")

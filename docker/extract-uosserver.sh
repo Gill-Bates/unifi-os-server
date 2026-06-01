@@ -6,6 +6,8 @@ set -e
 
 INSTALLER_PATH="/opt/uos/installer/uos-installer"
 OUTPUT_DIR="/output"
+MIN_EXPORT_SIZE_MB=500
+TEMP_EXTRACT=""
 
 log() {
     printf '[extract] %s\n' "$*"
@@ -15,6 +17,39 @@ error() {
     printf '[extract] ERROR: %s\n' "$*" >&2
     exit 1
 }
+
+cleanup() {
+    if [[ -n "$TEMP_EXTRACT" && -d "$TEMP_EXTRACT" ]]; then
+        rm -rf "$TEMP_EXTRACT"
+    fi
+}
+
+wait_for_storage_stable() {
+    local storage_base="$1"
+    local previous_size="${2:-0}"
+    local stable_count=0
+    local current_size=0
+
+    for (( settle=0; settle < 20; settle+=2 )); do
+        current_size=$(du -sm "$storage_base" 2>/dev/null | cut -f1 || echo "0")
+        if (( current_size > 1000 && current_size == previous_size )); then
+            stable_count=$((stable_count + 1))
+            if (( stable_count >= 2 )); then
+                log "Storage settled at ${current_size}MB after installer stop"
+                return 0
+            fi
+        else
+            stable_count=0
+        fi
+        previous_size=$current_size
+        sleep 2
+    done
+
+    log "Storage did not fully settle after installer stop (last size: ${previous_size}MB)"
+    return 1
+}
+
+trap cleanup EXIT
 
 validate_installer_url() {
     local url="$1"
@@ -40,7 +75,7 @@ validate_installer_url() {
         ui.com|dl.ui.com|fw-download.ubnt.com)
             ;;
         *.ui.com)
-            # Verify it's actually a subdomain, not a suffix match
+            # The case arm enforces the suffix; this regex keeps labels sane.
             [[ "$host" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.ui\.com$ ]] || \
                 error "Unexpected installer URL host: $host"
             ;;
@@ -156,6 +191,7 @@ for (( waited=0; waited < MAX_WAIT; waited+=5 )); do
                 kill -TERM "$INSTALLER_PID" 2>/dev/null || true
                 sleep 2
                 kill -KILL "$INSTALLER_PID" 2>/dev/null || true
+                wait_for_storage_stable "$STORAGE_BASE" "$STORAGE_SIZE" || true
                 break
             fi
         else
@@ -242,8 +278,8 @@ TAR_SIZE=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo "0")
 TAR_SIZE_MB=$((TAR_SIZE / 1024 / 1024))
 log "Exported tar size: ${TAR_SIZE_MB}MB"
 
-if (( TAR_SIZE_MB < 500 )); then
-    log "ERROR: Exported image is too small (${TAR_SIZE_MB}MB, expected >1500MB)"
+if (( TAR_SIZE_MB < MIN_EXPORT_SIZE_MB )); then
+    log "ERROR: Exported image is too small (${TAR_SIZE_MB}MB, expected >=${MIN_EXPORT_SIZE_MB}MB)"
     log "Tar contents:"
     tar -tvf "$OUTPUT_TAR" 2>/dev/null | head -20 || true
     log "This usually means the image import was not complete."
@@ -253,7 +289,7 @@ fi
 
 # Verify docker-archive format has required structure
 log "Verifying tar archive format..."
-ARCHIVE_FILES=$(tar -tf "$OUTPUT_TAR" 2>/dev/null | head -20)
+ARCHIVE_FILES=$(tar -tf "$OUTPUT_TAR" 2>/dev/null | head -20 || true)
 echo "$ARCHIVE_FILES"
 
 # Check specifically for missing repositories file (Docker requires it on some versions)
@@ -262,13 +298,12 @@ if ! tar -tf "$OUTPUT_TAR" 2>/dev/null | grep -q '^repositories$'; then
     log "WARNING: Archive missing repositories file - attempting repair"
     
     TEMP_EXTRACT=$(mktemp -d)
-    trap "rm -rf '$TEMP_EXTRACT'" EXIT
     
     log "Extracting archive for repair (this may take a minute on arm64)..."
     if ! tar -xf "$OUTPUT_TAR" -C "$TEMP_EXTRACT"; then
         log "ERROR: Failed to extract archive for repair"
         rm -rf "$TEMP_EXTRACT"
-        trap - EXIT
+        TEMP_EXTRACT=""
         error "Archive extraction failed"
     fi
     
@@ -287,7 +322,7 @@ if ! tar -tf "$OUTPUT_TAR" 2>/dev/null | grep -q '^repositories$'; then
             if [[ -n "$CONFIG_FILE" ]]; then
                 LAYER_ID="${CONFIG_FILE%.json}"
                 LAYER_ID="${LAYER_ID#sha256:}"
-                printf '{\"%s\":{\"%s\":\"%s\"}}\n' "$REPO_NAME" "$TAG_NAME" "$LAYER_ID" > "$TEMP_EXTRACT/repositories"
+                printf '{"%s":{"%s":"%s"}}\n' "$REPO_NAME" "$TAG_NAME" "$LAYER_ID" > "$TEMP_EXTRACT/repositories"
                 log "Created repositories file: $(cat "$TEMP_EXTRACT/repositories")"
                 
                 # Repack to temporary file first (preserve original on failure)
@@ -315,12 +350,12 @@ if ! tar -tf "$OUTPUT_TAR" 2>/dev/null | grep -q '^repositories$'; then
     fi
 
     rm -rf "$TEMP_EXTRACT"
-    trap - EXIT
+    TEMP_EXTRACT=""
 fi
 
 # Final verification
 log "Final archive verification:"
-tar -tf "$OUTPUT_TAR" | grep -E '^(manifest\.json|repositories|[a-f0-9]+\.json|[a-f0-9]+/layer\.tar)' | head -10
+tar -tf "$OUTPUT_TAR" 2>/dev/null | grep -E '^(manifest\.json|repositories|[a-f0-9]+\.json|[a-f0-9]+/layer\.tar)' | head -10 || true
 
 # Also save the image tag for the build script
 echo "$IMAGE_NAME" > "${OUTPUT_DIR}/image-tag.txt"

@@ -14,7 +14,7 @@ cat << 'EOF'
 | |_| | | | | |  _| | | (_) \__ \ \__ \  __/ |   \ V /  __/ |
  \__,_|_| |_|_|_| |_|  \___/|___/ |___/\___|_|    \_/ \___|_|
 
-            https://github.com/Gill-Bates/unifi-os-server
+         https://github.com/Gill-Bates/unifi-os-server
 
 EOF
 
@@ -70,6 +70,8 @@ validate_system_ip() {
         exit 1
     fi
 
+    # Conservative allowlist for adoption targets. This blocks control chars
+    # and shell-breaking input, but is not a full RFC-compliant host/IP parser.
     if ! printf '%s' "$system_ip" | grep -Eq '^([A-Za-z0-9.-]+|[0-9a-fA-F:]+)$'; then
         log_error "Invalid UOS_SYSTEM_IP: $system_ip"
         exit 1
@@ -99,7 +101,7 @@ if [ ! -f /data/uos_uuid ]; then
     else
         UUID=$(cat /proc/sys/kernel/random/uuid)
         # Set version nibble (position 14, 0-indexed) to '5' for UUIDv5 format
-        UOS_UUID=$(echo "$UUID" | sed 's/./5/15')
+        UOS_UUID="${UUID:0:14}5${UUID:15}"
         write_uos_uuid "$UOS_UUID"
         log_success "UOS_UUID: $UOS_UUID (generated)"
     fi
@@ -113,9 +115,9 @@ log_success "Version: $UOS_SERVER_VERSION"
 
 # Detect architecture and set firmware platform
 ARCH="$(dpkg --print-architecture)"
-if [ "$ARCH" == "amd64" ]; then
+if [ "$ARCH" = "amd64" ]; then
     FIRMWARE_PLATFORM=linux-x64
-elif [ "$ARCH" == "arm64" ]; then
+elif [ "$ARCH" = "arm64" ]; then
     FIRMWARE_PLATFORM=arm64
 else
     log_error "FIRMWARE_PLATFORM not found for $ARCH"
@@ -139,7 +141,9 @@ fi
 ensure_dir "/var/log/nginx" "nginx" "755"
 ensure_dir "/var/log/mongodb" "mongodb" "755"
 ensure_dir "/var/log/rabbitmq" "rabbitmq" "755"
-chown -R mongodb:mongodb "/var/lib/mongodb" 2>/dev/null || true
+if [ -d "/var/lib/mongodb" ] && [ "$(stat -c '%U:%G' /var/lib/mongodb 2>/dev/null || true)" != "mongodb:mongodb" ]; then
+    chown -R mongodb:mongodb "/var/lib/mongodb" 2>/dev/null || true
+fi
 
 # Initialize unifi-core config dirs (required for unifi-core service to start)
 if [ ! -d "/data/unifi-core/config/http" ]; then
@@ -181,21 +185,24 @@ preseed_postgres() {
     local pg_log="/var/log/postgresql/preseed.log"
     local pg_run="/var/run/postgresql"
     
-    mkdir -p /var/log/postgresql
-    chown postgres:postgres /var/log/postgresql
-    touch "$pg_log"
-    chown postgres:postgres "$pg_log"
-    chmod 640 "$pg_log"
+    # This function is called from an if-statement below, which suppresses bash
+    # errexit for the function body. Keep setup steps explicitly checked so an
+    # unexpected failure here does not silently fall through.
+    mkdir -p /var/log/postgresql || return 1
+    chown postgres:postgres /var/log/postgresql || return 1
+    touch "$pg_log" || return 1
+    chown postgres:postgres "$pg_log" || return 1
+    chmod 640 "$pg_log" || return 1
 
     # pg_ctl on Debian expects the runtime socket/lock dir to exist and be writable.
-    mkdir -p "$pg_run"
-    chown postgres:postgres "$pg_run"
-    chmod 775 "$pg_run"
+    mkdir -p "$pg_run" || return 1
+    chown postgres:postgres "$pg_run" || return 1
+    chmod 775 "$pg_run" || return 1
     
     # Ensure data directory exists with correct permissions
-    mkdir -p "$pg_data"
-    chown -R postgres:postgres "$pg_data"
-    chmod 700 "$pg_data"
+    mkdir -p "$pg_data" || return 1
+    chown -R postgres:postgres "$pg_data" || return 1
+    chmod 700 "$pg_data" || return 1
     
     # Check for initialized cluster (PG_VERSION file), not just directory existence.
     # An empty mounted volume would pass directory check but fail to start.
@@ -356,7 +363,7 @@ fi
 
 # Set UOS_SYSTEM_IP for device adoption
 UNIFI_SYSTEM_PROPERTIES="/var/lib/unifi/system.properties"
-if [ -n "${UOS_SYSTEM_IP+1}" ] && [ -n "$UOS_SYSTEM_IP" ]; then
+if [ -n "${UOS_SYSTEM_IP:-}" ]; then
     validate_system_ip "$UOS_SYSTEM_IP"
     mkdir -p "$(dirname "$UNIFI_SYSTEM_PROPERTIES")"
     if [ ! -f "$UNIFI_SYSTEM_PROPERTIES" ]; then

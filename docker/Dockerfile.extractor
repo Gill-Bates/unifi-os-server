@@ -22,7 +22,6 @@ RUN apt-get update \
 		procps \
 		skopeo \
 		slirp4netns \
-		systemd \
 		uidmap \
 		util-linux \
 	&& rm -rf /var/lib/apt/lists/*

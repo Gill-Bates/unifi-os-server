@@ -156,13 +156,15 @@ jobs:
 
       - name: Compare versions
         id: check
+        env:
+          CURRENT: ${{ steps.current.outputs.version }}
+          API_AVAILABLE: ${{ steps.latest.outputs.api_available }}
+          LATEST: ${{ steps.latest.outputs.version }}
+          URL_X64: ${{ steps.latest.outputs.url_x64 }}
+          URL_ARM64: ${{ steps.latest.outputs.url_arm64 }}
+          FORCE: ${{ github.event.inputs.force_build || 'false' }}
         run: |
-          CURRENT="${{ steps.current.outputs.version }}"
-          API_AVAILABLE="${{ steps.latest.outputs.api_available }}"
-          LATEST="${{ steps.latest.outputs.version }}"
-          URL_X64="${{ steps.latest.outputs.url_x64 }}"
-          URL_ARM64="${{ steps.latest.outputs.url_arm64 }}"
-          FORCE="${{ github.event.inputs.force_build || 'false' }}"
+          set -Eeuo pipefail
 
           set_output() {
             local key="$1"
@@ -257,6 +259,10 @@ jobs:
     steps:
       - name: Trigger build workflow
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          LATEST_VERSION: ${{ needs.check-version.outputs.latest_version }}
+          URL_X64: ${{ needs.check-version.outputs.url_x64 }}
+          URL_ARM64: ${{ needs.check-version.outputs.url_arm64 }}
         with:
           script: |
             const refName = context.payload?.repository?.default_branch || context.ref.replace('refs/heads/', '');
@@ -269,9 +275,9 @@ jobs:
               inputs: {
                 push: 'true',
                 platforms: 'linux/amd64,linux/arm64',
-                version: '${{ needs.check-version.outputs.latest_version }}',
-                url_x64: '${{ needs.check-version.outputs.url_x64 }}',
-                url_arm64: '${{ needs.check-version.outputs.url_arm64 }}',
+                version: process.env.LATEST_VERSION,
+                url_x64: process.env.URL_X64,
+                url_arm64: process.env.URL_ARM64,
                 enforce_trivy_gate: 'false'  // Keep current non-blocking default for upstream CVEs
               }
             });

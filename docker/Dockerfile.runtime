@@ -25,9 +25,9 @@ LABEL org.opencontainers.image.title="unifi-os-server" \
 ENV UOS_SERVER_VERSION="${APP_VERSION}"
 
 # Copy our entrypoint that configures the container before starting systemd
-COPY --chmod=755 docker/uos-entrypoint.sh /root/uos-entrypoint.sh
+COPY --chmod=755 docker/uos-entrypoint.sh /usr/local/bin/uos-entrypoint.sh
 
 # systemd needs SIGRTMIN+3 for clean shutdown
 STOPSIGNAL SIGRTMIN+3
 
-ENTRYPOINT ["/root/uos-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/uos-entrypoint.sh"]
