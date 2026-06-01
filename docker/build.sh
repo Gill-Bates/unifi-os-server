@@ -964,7 +964,7 @@ validate_runtime_image() {
     local systemd_state=""
 
     while (( elapsed < timeout )); do
-        systemd_state=$(docker exec "$container_name" systemctl is-system-running 2>/dev/null || echo "unknown")
+        systemd_state=$(timeout 10 docker exec "$container_name" systemctl is-system-running 2>/dev/null || echo "unknown")
         
         case "$systemd_state" in
             running|degraded)
@@ -1054,26 +1054,48 @@ validate_runtime_image() {
         fatal "Validation failed: container did not survive restart"
     fi
 
-    # Wait for systemd after restart
+    # Wait for systemd after restart. This is intentionally non-fatal:
+    # complex systemd appliance containers can need a long recovery window after
+    # docker stop/start, while the initial boot/service/port validation above is
+    # the authoritative image health check.
     elapsed=0
-    while (( elapsed < 60 )); do
-        systemd_state=$(docker exec "$container_name" systemctl is-system-running 2>/dev/null || echo "unknown")
+    local restart_timeout=180
+    systemd_state="unknown"
+
+    while (( elapsed < restart_timeout )); do
+        state=$(get_container_state "$container_name")
+        if [[ "$state" != "running" ]]; then
+            error "  Container exited after restart"
+            print_container_state "$container_name"
+            preserve_failure "$container_name" "$arch" "validation" "Container exited after restart: $state"
+            fatal "Validation failed: container did not survive restart"
+        fi
+
+        systemd_state=$(timeout 10 docker exec "$container_name" systemctl is-system-running 2>/dev/null || echo "unknown")
         if [[ "$systemd_state" == "running" || "$systemd_state" == "degraded" ]]; then
             log "  ✓ Container survived restart (systemd: $systemd_state)"
             break
         fi
+
         sleep 2
         elapsed=$((elapsed + 2))
     done
 
     if [[ "$systemd_state" != "running" && "$systemd_state" != "degraded" ]]; then
-        warn "  ✗ systemd not ready after restart"
+        warn "  ✗ systemd not ready after restart after ${restart_timeout}s (state: $systemd_state)"
         validation_state="degraded"
     fi
 
-    # Show running services summary
+    # Show running services summary. Keep this bounded: if systemd/dbus is stuck
+    # after restart, an unbounded `docker exec systemctl ...` can hang the CI job.
     log "Running services after validation:"
-    docker exec "$container_name" systemctl list-units --type=service --state=running 2>/dev/null | grep -E '^\s*\S+\.service' | head -15 >&2 || true
+    if [[ "$systemd_state" == "running" || "$systemd_state" == "degraded" ]]; then
+        timeout 20 docker exec "$container_name" systemctl list-units --type=service --state=running 2>/dev/null             | grep -E '^\s*\S+\.service'             | head -15 >&2 || warn "  Could not list running services after validation"
+    else
+        warn "  Skipping systemctl service summary because systemd is not ready after restart"
+        print_container_state "$container_name" "  "
+        timeout 10 docker logs --tail 120 "$container_name" >&2 || true
+    fi
 
     # Cleanup validation container
     docker stop -t 10 "$container_name" >/dev/null 2>&1 || true
@@ -1260,6 +1282,7 @@ main() {
     require_cmd grep
     require_cmd sed
     require_cmd jq
+    require_cmd timeout
 
     load_config
     validate_requested_platforms
