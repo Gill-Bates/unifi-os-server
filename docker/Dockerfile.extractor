@@ -37,18 +37,14 @@ RUN mkdir -p \
 
 # Stub loginctl to avoid installer spinning on user-status
 COPY --chmod=755 docker/loginctl-stub.sh /usr/local/bin/loginctl
-RUN test -x /usr/bin/loginctl \
-	&& mv /usr/bin/loginctl /usr/bin/loginctl.real \
+RUN if [ -x /usr/bin/loginctl ] && [ ! -L /usr/bin/loginctl ]; then mv /usr/bin/loginctl /usr/bin/loginctl.real; fi \
 	&& ln -sf /usr/local/bin/loginctl /usr/bin/loginctl \
-	&& test -x /usr/bin/loginctl.real \
 	&& test -L /usr/bin/loginctl
 
 # Stub systemctl for non-systemd environment
 COPY --chmod=755 docker/systemctl-stub.sh /usr/local/bin/systemctl
-RUN test -x /usr/bin/systemctl \
-	&& mv /usr/bin/systemctl /usr/bin/systemctl.real \
+RUN if [ -x /usr/bin/systemctl ] && [ ! -L /usr/bin/systemctl ]; then mv /usr/bin/systemctl /usr/bin/systemctl.real; fi \
 	&& ln -sf /usr/local/bin/systemctl /usr/bin/systemctl \
-	&& test -x /usr/bin/systemctl.real \
 	&& test -L /usr/bin/systemctl
 
 # Copy extraction script
