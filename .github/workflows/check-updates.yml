@@ -279,6 +279,9 @@ jobs:
                 url_x64: process.env.URL_X64,
                 url_arm64: process.env.URL_ARM64,
                 enforce_trivy_gate: 'false'  // Keep current non-blocking default for upstream CVEs
+              },
+              headers: {
+                'X-GitHub-Api-Version': '2022-11-28'
               }
             });
             console.log('Triggered build workflow for amd64 + arm64');
