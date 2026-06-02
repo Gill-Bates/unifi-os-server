@@ -9,38 +9,59 @@
 
 <p align="center">
   <a href="https://github.com/Gill-Bates/unifi-os-server/releases">
-    <img src="https://img.shields.io/github/v/tag/Gill-Bates/unifi-os-server?label=version&color=blue" alt="Latest Version">
+    <img src="https://img.shields.io/github/v/tag/Gill-Bates/unifi-os-server?label=version&color=0066cc" alt="Latest Version">
   </a>
+  <a href="https://hub.docker.com/r/giiibates/unifi-os-server">
+    <img src="https://img.shields.io/docker/v/giiibates/unifi-os-server?sort=semver&label=docker%20hub&color=0db7ed" alt="Docker Hub Version">
+  </a>
+  <a href="https://hub.docker.com/r/giiibates/unifi-os-server">
+    <img src="https://img.shields.io/docker/pulls/giiibates/unifi-os-server" alt="Docker Pulls">
+  </a>
+  <a href="https://hub.docker.com/r/giiibates/unifi-os-server">
+    <img src="https://img.shields.io/docker/image-size/giiibates/unifi-os-server/latest?label=image%20size" alt="Image Size">
+  </a>
+  <br>
   <a href="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/docker-build.yml">
     <img src="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/docker-build.yml/badge.svg" alt="Docker Build">
   </a>
   <a href="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/check-updates.yml">
     <img src="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/check-updates.yml/badge.svg" alt="Check Updates">
   </a>
-  <a href="https://hub.docker.com/r/giiibates/unifi-os-server">
-    <img src="https://img.shields.io/docker/pulls/giiibates/unifi-os-server" alt="Docker Pulls">
+  <a href="https://github.com/Gill-Bates/unifi-os-server/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/Gill-Bates/unifi-os-server" alt="License">
   </a>
+  <img src="https://img.shields.io/badge/platform-linux%2Famd64%20%7C%20linux%2Farm64-lightgrey" alt="Platforms">
 </p>
 
-# UniFi OS Server
+<center>
+<h1>UniFi OS Server</h1>
+</center>
 
-Unofficial Docker image for running **UniFi OS Server** with Docker Compose.
-
-This image is built from the official UniFi OS Server software distributed by Ubiquiti. The build extracts the internal `uosserver` image from the official installer and wraps it into a Docker runtime image.
+<p align="center">
+Unofficial Docker image for running <strong>UniFi OS Server</strong> with Docker Compose.<br>
+Built from the official UniFi OS Server software distributed by Ubiquiti — the internal <code>uosserver</code> image is extracted from the official installer and wrapped into a Docker runtime image.
+</p>
 
 ## Tags
 
+<details>
+<summary><strong>Available tags and supported platforms</strong></summary>
+
+<br>
+
 | Tag | Description |
 |---|---|
-| `latest` | Latest published UniFi OS Server image |
-| `<version>` | Versioned multi-architecture image |
-| `<version>-amd64` | amd64 image |
-| `<version>-arm64` | arm64 image |
+| `latest` | Latest published multi-architecture image |
+| `<version>` | Versioned multi-architecture image (e.g. `5.1.15`) |
 
 Supported platforms:
 
 - `linux/amd64`
 - `linux/arm64`
+
+> Architecture-specific tags (`<version>-amd64`, `<version>-arm64`) are used only as intermediate build artifacts and are removed from Docker Hub after the multi-arch manifest is created.
+
+</details>
 
 ## Quick Start
 
@@ -66,14 +87,25 @@ services:
       - NET_ADMIN
 
     environment:
-      - UOS_SYSTEM_IP=unifi.example.com
+      UOS_SYSTEM_IP: ${UOS_SYSTEM_IP:-}
+      HARDWARE_PLATFORM: ${HARDWARE_PLATFORM:-}
 
     ports:
-      - "11443:443/tcp"
-      - "8080:8080/tcp"
-      - "8443:8443/tcp"
+      - "11443:443"
+      - "8080:8080"
+      - "8443:8443"
+      - "8444:8444"
       - "3478:3478/udp"
       - "10003:10003/udp"
+      - "5514:5514/udp"
+      - "5671:5671"
+      - "5005:5005"
+      - "6789:6789"
+      - "8880:8880"
+      - "8881:8881"
+      - "8882:8882"
+      - "9543:9543"
+      - "11084:11084"
 
     tmpfs:
       - /run:exec
@@ -118,7 +150,7 @@ Set this to the hostname or IP address that UniFi devices should use to reach th
 
 ```yaml
 environment:
-  - UOS_SYSTEM_IP=192.168.1.10
+  UOS_SYSTEM_IP: 192.168.1.10
 ```
 
 ### `HARDWARE_PLATFORM`
@@ -127,28 +159,35 @@ Optional. Set to `synology` when running on Synology NAS hardware that is not au
 
 ```yaml
 environment:
-  - HARDWARE_PLATFORM=synology
+  HARDWARE_PLATFORM: synology
 ```
 
 ## Ports
+
+<details>
+<summary><strong>Full port reference</strong></summary>
+
+<br>
 
 | Port | Protocol | Required | Purpose |
 |---:|:---:|:---:|---|
 | `443` / `11443` | TCP | ✔ | UniFi OS web interface |
 | `8080` | TCP | ✔ | Device and application communication |
-| `8443` | TCP | ✔ | UniFi Network Application GUI/API |
 | `3478` | UDP | ✔ | STUN / device adoption |
 | `10003` | UDP | ✔ | Device discovery |
+| `8443` | TCP | | UniFi Network Application GUI/API |
 | `8444` | TCP | | Hotspot portal (SSL) |
-| `6789` | TCP | | Mobile speed test |
-| `9543` | TCP | | UniFi Identity Hub |
-| `11084` | TCP | | UniFi Site Supervisor |
+| `5514` | UDP | | Remote syslog |
 | `5671` | TCP | | AMQPS |
+| `5005` | TCP | | RTP |
+| `6789` | TCP | | Mobile speed test |
 | `8880` | TCP | | Hotspot portal redirect (HTTP) |
 | `8881` | TCP | | Hotspot portal redirect |
 | `8882` | TCP | | Hotspot portal redirect |
-| `5514` | UDP | | Remote syslog |
-| `5005` | TCP | | RTP |
+| `9543` | TCP | | UniFi Identity Hub |
+| `11084` | TCP | | UniFi Site Supervisor |
+
+</details>
 
 ## Updating
 
@@ -162,11 +201,14 @@ Persistent data under `./data` remains intact.
 ## Troubleshooting
 
 ```bash
-# Live container log (systemd + all services)
+# Live container log (systemd journal forwarded to Docker log driver)
 docker logs -f unifi-os-server
 
 # Service startup status
 docker exec -it unifi-os-server systemctl list-jobs
+
+# Show all service states
+docker exec -it unifi-os-server systemctl list-units --type=service
 
 # Active network listeners
 docker exec -it unifi-os-server ss -tulpn
@@ -174,9 +216,17 @@ docker exec -it unifi-os-server ss -tulpn
 # UniFi core service log
 docker exec -it unifi-os-server journalctl -u unifi-core -f
 
+# UniFi Network application log
+docker exec -it unifi-os-server journalctl -u unifi -f
+
 # PostgreSQL log
 docker exec -it unifi-os-server journalctl -u postgresql -f
+
+# RabbitMQ log
+docker exec -it unifi-os-server journalctl -u rabbitmq-server -f
 ```
+
+> The systemd journal is forwarded directly to Docker's log driver. `docker logs -f` shows all service output without needing a TTY.
 
 ## Security Notice
 

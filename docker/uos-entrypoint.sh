@@ -1,7 +1,11 @@
 #!/bin/bash
 # Entrypoint for UniFi OS Server runtime container.
 # Based on lemker/unifi-os-server approach - runs systemd directly.
-set -e
+# -E: ERR trap inherited by functions/subshells
+# -e: exit on error
+# -u: treat unset variables as errors (all optional vars use ${VAR:-} defaults)
+# -o pipefail: pipe fails if any command in the pipe fails
+set -Eeuo pipefail
 
 # -----------------------------------------------------------------------------
 # Colors & Formatting
@@ -151,7 +155,10 @@ log_success "Platform: $FIRMWARE_PLATFORM"
 # This is OPTIONAL - some setups don't have tap0 or macvlan support.
 if [ ! -d "/sys/devices/virtual/net/eth0" ] && [ -d "/sys/devices/virtual/net/tap0" ]; then
     if ip link add name eth0 link tap0 type macvlan 2>/dev/null; then
-        ip link set eth0 up || log_warn "Failed to bring up eth0 macvlan alias"
+        if ! ip link set eth0 up 2>/dev/null; then
+            log_warn "eth0 macvlan alias up failed — removing half-configured interface"
+            ip link del eth0 2>/dev/null || true
+        fi
     else
         log_warn "macvlan setup failed (tap0 exists but macvlan unavailable), continuing without eth0 alias"
     fi
@@ -289,10 +296,25 @@ preseed_postgres() {
     for config in "${db_configs[@]}"; do
         local dbname="${config%%:*}"
         local owner="${config##*:}"
-        
-        # Create user if not exists (suppress output)
-        runuser -u postgres -- "$pg_bin/psql" -c "CREATE USER \"$owner\";" >> "$pg_log" 2>&1 || true
-        
+
+        # db_configs is a static hardcoded array. Validate identifiers here so
+        # that if the list is ever made dynamic this check catches unsafe input.
+        if ! printf '%s' "${dbname}${owner}" | grep -Eq '^[a-zA-Z0-9_-]+$'; then
+            log_error "Refusing unsafe db/owner identifier: $config"
+            exit 1
+        fi
+
+        # Create user only if it does not exist; distinguish "already exists"
+        # (expected) from a real error (cluster down, permission denied).
+        if ! runuser -u postgres -- "$pg_bin/psql" -tAc \
+             "SELECT 1 FROM pg_roles WHERE rolname='${owner}'" 2>"$pg_log" | grep -q 1; then
+            if ! runuser -u postgres -- "$pg_bin/psql" -c "CREATE USER \"${owner}\";" >> "$pg_log" 2>&1; then
+                log_error "CREATE USER ${owner} failed (see $pg_log)"
+                failed=$((failed + 1))
+                continue
+            fi
+        fi
+
         # Create database if not exists
         if ! runuser -u postgres -- "$pg_bin/psql" -lqt | cut -d \| -f 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -Fxq "$dbname"; then
             if runuser -u postgres -- "$pg_bin/createdb" -O "$owner" "$dbname" >> "$pg_log" 2>&1; then
@@ -304,9 +326,13 @@ preseed_postgres() {
         else
             existed=$((existed + 1))
         fi
-        
-        # Grant privileges (suppress output)
-        runuser -u postgres -- "$pg_bin/psql" -c "GRANT ALL PRIVILEGES ON DATABASE \"$dbname\" TO \"$owner\";" >> "$pg_log" 2>&1 || true
+
+        # Grant privileges; failure here is not idempotent-safe to suppress.
+        if ! runuser -u postgres -- "$pg_bin/psql" -c \
+             "GRANT ALL PRIVILEGES ON DATABASE \"${dbname}\" TO \"${owner}\";" >> "$pg_log" 2>&1; then
+            log_error "GRANT on ${dbname} to ${owner} failed (see $pg_log)"
+            failed=$((failed + 1))
+        fi
     done
     
     # Stop PostgreSQL - systemd will start it properly
@@ -330,8 +356,10 @@ PG_DATA="/var/lib/postgresql/14/main"
 PRESEED_MARKER="${PG_DATA}/.uos_postgres_preseeded_v${PRESEED_MARKER_VERSION}"
 
 # Ensure pg_data exists before checking marker (handles first boot with empty volume)
-mkdir -p "$PG_DATA"
-chown postgres:postgres "$PG_DATA"
+if ! mkdir -p "$PG_DATA" || ! chown postgres:postgres "$PG_DATA"; then
+    log_error "Cannot prepare $PG_DATA — check volume mount and permissions"
+    exit 1
+fi
 
 if [ ! -f "$PRESEED_MARKER" ]; then
     log_section "PostgreSQL Setup"
