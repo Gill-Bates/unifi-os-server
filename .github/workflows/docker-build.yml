@@ -91,6 +91,14 @@ jobs:
           UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
           UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
         run: |
+          # Reproducible BUILD_DATE: bind to the commit, not wall-clock time.
+          # Identical source + installer -> identical image digest, so a rebuild
+          # of the same version overwrites the same digest instead of creating
+          # a new untagged orphan in the registry.
+          BUILD_DATE="$(git -C "$GITHUB_WORKSPACE" log -1 --format=%cI)"
+          export BUILD_DATE
+          echo "Using reproducible BUILD_DATE=${BUILD_DATE}"
+
           bash ./docker/build.sh
 
           VERSION="$(
@@ -253,6 +261,14 @@ jobs:
           UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
           UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
         run: |
+          # Reproducible BUILD_DATE: bind to the commit, not wall-clock time.
+          # Identical source + installer -> identical image digest, so a rebuild
+          # of the same version overwrites the same digest instead of creating
+          # a new untagged orphan in the registry.
+          BUILD_DATE="$(git -C "$GITHUB_WORKSPACE" log -1 --format=%cI)"
+          export BUILD_DATE
+          echo "Using reproducible BUILD_DATE=${BUILD_DATE}"
+
           bash ./docker/build.sh
 
           VERSION="$(
@@ -390,27 +406,34 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Delete existing manifests from Docker Hub (idempotency)
+      - name: Acquire Docker Hub API token
+        id: hubtoken
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
-          VERSION="${{ needs.build-amd64.outputs.version }}"
-
           LOGIN_RESPONSE=$(curl -fsSL -X POST \
             -H "Content-Type: application/json" \
             -d "{\"username\": \"${DOCKERHUB_USERNAME}\", \"password\": \"${DOCKERHUB_PASSWORD}\"}" \
             https://hub.docker.com/v2/users/login/)
           TOKEN=$(echo "${LOGIN_RESPONSE}" | jq -r '.token // empty')
-
           if [[ -z "${TOKEN}" ]]; then
-            echo "Failed to obtain Docker Hub token for manifest cleanup" >&2
+            echo "Failed to obtain Docker Hub API token" >&2
             exit 1
           fi
+          # Mask so the token never appears in logs, then expose to later steps.
+          echo "::add-mask::${TOKEN}"
+          echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
+
+      - name: Delete existing manifest tags from Docker Hub (idempotency)
+        env:
+          HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
+        run: |
+          VERSION="${{ needs.build-amd64.outputs.version }}"
 
           for TAG in "${VERSION}" "latest"; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Authorization: Bearer ${HUB_TOKEN}" \
               "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${TAG}/")
             if [[ "${STATUS}" == "200" || "${STATUS}" == "204" ]]; then
               echo "Deleted existing manifest tag: ${TAG}"
@@ -471,26 +494,14 @@ jobs:
 
       - name: Delete arch-specific tags from Docker Hub
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+          HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
         run: |
           VERSION="${{ needs.build-amd64.outputs.version }}"
-
-          LOGIN_RESPONSE=$(curl -fsSL -X POST \
-            -H "Content-Type: application/json" \
-            -d "{\"username\": \"${DOCKERHUB_USERNAME}\", \"password\": \"${DOCKERHUB_PASSWORD}\"}" \
-            https://hub.docker.com/v2/users/login/)
-          TOKEN=$(echo "${LOGIN_RESPONSE}" | jq -r '.token // empty')
-
-          if [[ -z "${TOKEN}" ]]; then
-            echo "Failed to obtain Docker Hub token for arch-tag cleanup" >&2
-            exit 1
-          fi
 
           for ARCH in amd64 arm64; do
             TAG="${VERSION}-${ARCH}"
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Authorization: Bearer ${HUB_TOKEN}" \
               "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${TAG}/")
             if [[ "${STATUS}" == "200" || "${STATUS}" == "204" ]]; then
               echo "Deleted arch-specific tag: ${TAG}"
@@ -501,6 +512,66 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Prune untagged digests from Docker Hub
+        env:
+          HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          # Tag deletion only removes references; the underlying digests stay in
+          # the repo as untagged orphans. Each rebuild with changed content
+          # would otherwise accumulate ghost Image/Image-Index objects.
+          # This step keeps only digests referenced by an active tag.
+
+          # 1. Collect all digests currently referenced by any tag (keep set).
+          #    Include sub-image digests that sit under a manifest index.
+          KEEP="$(mktemp)"
+          NEXT="https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/?page_size=100"
+          while [[ -n "${NEXT}" && "${NEXT}" != "null" ]]; do
+            PAGE=$(curl -fsSL -H "Authorization: Bearer ${HUB_TOKEN}" "${NEXT}")
+            echo "${PAGE}" | jq -r '
+              .results[]
+              | ( .digest // empty ),
+                ( .images[]?.digest // empty )
+            ' >> "${KEEP}"
+            NEXT=$(echo "${PAGE}" | jq -r '.next // empty')
+          done
+          sort -u "${KEEP}" -o "${KEEP}"
+          echo "Referenced (kept) digests:"
+          cat "${KEEP}" || true
+
+          # 2. Walk all active image objects and prune anything not in the keep set.
+          PRUNED=0
+          NEXT="https://hub.docker.com/v2/repositories/${IMAGE_NAME}/images/?page_size=100&status=active"
+          while [[ -n "${NEXT}" && "${NEXT}" != "null" ]]; do
+            PAGE=$(curl -fsSL -H "Authorization: Bearer ${HUB_TOKEN}" "${NEXT}")
+
+            while read -r DIGEST; do
+              [[ -n "${DIGEST}" ]] || continue
+              if grep -qxF "${DIGEST}" "${KEEP}"; then
+                echo "Keep (tagged): ${DIGEST}"
+                continue
+              fi
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+                -H "Authorization: Bearer ${HUB_TOKEN}" \
+                "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/images/${DIGEST}/")
+              if [[ "${STATUS}" == "200" || "${STATUS}" == "202" || "${STATUS}" == "204" ]]; then
+                echo "Pruned untagged digest: ${DIGEST} (HTTP ${STATUS})"
+                PRUNED=$((PRUNED + 1))
+              elif [[ "${STATUS}" == "404" ]]; then
+                echo "Digest already gone: ${DIGEST}"
+              else
+                # Do not fail the release on a single prune hiccup — log and continue.
+                echo "WARNING: unexpected HTTP ${STATUS} pruning ${DIGEST}" >&2
+              fi
+            done < <(echo "${PAGE}" | jq -r '.results[].digest // empty')
+
+            NEXT=$(echo "${PAGE}" | jq -r '.next // empty')
+          done
+
+          echo "Pruned ${PRUNED} untagged digest(s)."
+          rm -f "${KEEP}"
 
   create-release:
     name: Create GitHub Release
@@ -762,10 +833,10 @@ jobs:
               '**Docker Image:** `docker pull ' + imageName + ':' + version + '`',
               '',
               '### Available Tags',
-              '- `' + imageName + ':' + version + '` (multi-arch)',
-              '- `' + imageName + ':' + version + '-amd64`',
-              '- `' + imageName + ':' + version + '-arm64`',
+              '- `' + imageName + ':' + version + '` (multi-arch: linux/amd64, linux/arm64)',
               '- `' + imageName + ':latest`',
+              '',
+              '> Architecture-specific tags (`-amd64`, `-arm64`) are removed from Docker Hub after the multi-arch manifest is published.',
               '',
               '### Security Scan Results',
               '',
