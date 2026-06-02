@@ -406,13 +406,20 @@ log_section "Starting Services"
 log_info "Handing off to systemd..."
 printf "\n  ${C_GRAY}──────────────────────────────────────────────${C_RESET}\n\n"
 
-# Forward systemd journal to console so docker logs shows service activity
+# Forward systemd journal to docker logs.
+# ForwardToConsole=yes normally writes to /dev/console (the kernel TTY device).
+# In Docker without -t, /dev/console is not connected to the log driver's pipe.
+# TTYPath=/dev/stdout redirects journal output to journald's own fd 1, which is
+# inherited from PID 1, which is inherited from the original entrypoint process —
+# the same fd that Docker's log driver captures regardless of whether a TTY is
+# allocated.
 mkdir -p /etc/systemd/journald.conf.d
 {
     echo "[Journal]"
     echo "Storage=volatile"
     echo "ForwardToConsole=yes"
     echo "MaxLevelConsole=info"
+    echo "TTYPath=/dev/stdout"
 } > /etc/systemd/journald.conf.d/docker-console.conf
 
 # Start systemd
