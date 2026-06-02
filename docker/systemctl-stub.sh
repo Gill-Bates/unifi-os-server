@@ -22,11 +22,12 @@ case "$command" in
         exit 0
         ;;
     is-active)
-        # Intentionally return exit 0: the installer/build flow probes this in
-        # shell conditionals and only needs a non-failing answer while systemd
-        # is absent in the extractor container.
+        # Mirror real systemctl semantics: inactive services return non-zero.
+        # If the installer ever needs a unit to appear active during extraction,
+        # add that unit explicitly with a documented rationale rather than
+        # blanket-faking success for every is-active probe.
         printf 'inactive\n'
-        exit 0
+        exit 3
         ;;
     is-system-running)
         # Return "running" to satisfy installer's systemd-ready check

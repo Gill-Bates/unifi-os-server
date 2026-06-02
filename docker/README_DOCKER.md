@@ -105,7 +105,7 @@ services:
       - /run:exec
       - /run/lock
       - /tmp:exec
-      - /var/lib/journal
+      # journald uses /run/log/journal with Storage=volatile
       - /var/opt/unifi/tmp:size=64m
 
     volumes:

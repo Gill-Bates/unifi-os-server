@@ -482,11 +482,11 @@ jobs:
 
           # Create version manifest
           docker manifest create "${IMAGE_NAME}:${VERSION}" "${IMAGES[@]}" --amend
-          docker manifest push "${IMAGE_NAME}:${VERSION}"
+          docker manifest push "${IMAGE_NAME}:${VERSION}" || { echo "Versioned manifest push failed" >&2; exit 1; }
           
           # Create latest manifest
           docker manifest create "${IMAGE_NAME}:latest" "${IMAGES[@]}" --amend
-          docker manifest push "${IMAGE_NAME}:latest"
+          docker manifest push "${IMAGE_NAME}:latest" || { echo "latest manifest push failed" >&2; exit 1; }
           
           echo "Pushed manifests:"
           echo "  ${IMAGE_NAME}:${VERSION}"
@@ -519,64 +519,52 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Tag deletion only removes references; the underlying digests stay in
-          # the repo as untagged orphans. Each rebuild with changed content
-          # would otherwise accumulate ghost Image/Image-Index objects.
-          # This step keeps only digests referenced by an active tag.
+          # Tag deletion only removes the tag reference; the underlying image
+          # object (digest) stays in the repo as an untagged orphan.  This step
+          # uses Docker Hub's namespaces API with status=inactive to enumerate
+          # and delete those orphans directly.
+          #
+          # API note: the legacy /v2/repositories/{ns}/{repo}/images/ path returns
+          # 404 for free-plan repos.  The correct endpoint is:
+          #   /v2/namespaces/{ns}/repositories/{repo}/images?status=inactive
+          # where "inactive" = untagged (no current tag reference).
 
-          # 1. Collect all digests currently referenced by any tag (keep set).
-          #    Include sub-image digests that sit under a manifest index.
-          KEEP="$(mktemp)"
-          NEXT="https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/?page_size=100"
-          while [[ -n "${NEXT}" && "${NEXT}" != "null" ]]; do
-            PAGE=$(curl -fsSL -H "Authorization: Bearer ${HUB_TOKEN}" "${NEXT}")
-            echo "${PAGE}" | jq -r '
-              .results[]
-              | ( .digest // empty ),
-                ( .images[]?.digest // empty )
-            ' >> "${KEEP}"
-            NEXT=$(echo "${PAGE}" | jq -r '.next // empty')
-          done
-          sort -u "${KEEP}" -o "${KEEP}"
-          echo "Referenced (kept) digests:"
-          cat "${KEEP}" || true
+          NAMESPACE="${IMAGE_NAME%%/*}"
+          REPO="${IMAGE_NAME#*/}"
+          IMAGES_BASE="https://hub.docker.com/v2/namespaces/${NAMESPACE}/repositories/${REPO}/images"
 
-          # 2. Walk all active image objects and prune anything not in the keep set.
           PRUNED=0
-          NEXT="https://hub.docker.com/v2/repositories/${IMAGE_NAME}/images/?page_size=100&status=active"
+          NEXT="${IMAGES_BASE}?status=inactive&page_size=100"
           while [[ -n "${NEXT}" && "${NEXT}" != "null" ]]; do
-            # Use -w to capture HTTP status; do NOT use -f so 404 is handled below
-            # rather than aborting the entire step.
-            HTTP_STATUS=""
-            PAGE=$(curl -sSL -w '\n%{http_code}' -H "Authorization: Bearer ${HUB_TOKEN}" "${NEXT}")
+            PAGE=$(curl -sSL -w '\n%{http_code}' \
+              -H "Authorization: Bearer ${HUB_TOKEN}" \
+              "${NEXT}")
             HTTP_STATUS=$(echo "${PAGE}" | tail -1)
             PAGE=$(echo "${PAGE}" | head -n -1)
 
             if [[ "${HTTP_STATUS}" == "404" ]]; then
-              echo "Images API returned 404 — no untagged image objects present."
+              echo "Inactive images API returned 404 — no orphaned image objects or feature unavailable for this plan."
               break
             fi
             if [[ "${HTTP_STATUS}" != "200" ]]; then
-              echo "WARNING: Images API returned HTTP ${HTTP_STATUS}; skipping prune." >&2
+              echo "WARNING: Inactive images API returned HTTP ${HTTP_STATUS}; skipping prune." >&2
               break
             fi
 
+            COUNT=$(echo "${PAGE}" | jq -r '.count // 0')
+            echo "Inactive (untagged) image objects found: ${COUNT}"
+
             while read -r DIGEST; do
               [[ -n "${DIGEST}" ]] || continue
-              if grep -qxF "${DIGEST}" "${KEEP}"; then
-                echo "Keep (tagged): ${DIGEST}"
-                continue
-              fi
               STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
                 -H "Authorization: Bearer ${HUB_TOKEN}" \
-                "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/images/${DIGEST}/")
+                "${IMAGES_BASE}/${DIGEST}/")
               if [[ "${STATUS}" == "200" || "${STATUS}" == "202" || "${STATUS}" == "204" ]]; then
-                echo "Pruned untagged digest: ${DIGEST} (HTTP ${STATUS})"
+                echo "Pruned: ${DIGEST} (HTTP ${STATUS})"
                 PRUNED=$((PRUNED + 1))
               elif [[ "${STATUS}" == "404" ]]; then
-                echo "Digest already gone: ${DIGEST}"
+                echo "Already gone: ${DIGEST}"
               else
-                # Do not fail the release on a single prune hiccup — log and continue.
                 echo "WARNING: unexpected HTTP ${STATUS} pruning ${DIGEST}" >&2
               fi
             done < <(echo "${PAGE}" | jq -r '.results[].digest // empty')
@@ -585,7 +573,6 @@ jobs:
           done
 
           echo "Pruned ${PRUNED} untagged digest(s)."
-          rm -f "${KEEP}"
 
   create-release:
     name: Create GitHub Release

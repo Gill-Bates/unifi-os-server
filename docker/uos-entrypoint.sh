@@ -306,8 +306,16 @@ preseed_postgres() {
 
         # Create user only if it does not exist; distinguish "already exists"
         # (expected) from a real error (cluster down, permission denied).
-        if ! runuser -u postgres -- "$pg_bin/psql" -tAc \
-             "SELECT 1 FROM pg_roles WHERE rolname='${owner}'" 2>"$pg_log" | grep -q 1; then
+        local role_exists=""
+        if ! role_exists=$(runuser -u postgres -- "$pg_bin/psql" -tAc \
+             "SELECT 1 FROM pg_roles WHERE rolname='${owner}'" 2>>"$pg_log"); then
+            log_error "Role lookup ${owner} failed (see $pg_log)"
+            failed=$((failed + 1))
+            continue
+        fi
+        role_exists=$(printf '%s' "$role_exists" | tr -d '[:space:]')
+
+        if [ "$role_exists" != "1" ]; then
             if ! runuser -u postgres -- "$pg_bin/psql" -c "CREATE USER \"${owner}\";" >> "$pg_log" 2>&1; then
                 log_error "CREATE USER ${owner} failed (see $pg_log)"
                 failed=$((failed + 1))
@@ -316,7 +324,16 @@ preseed_postgres() {
         fi
 
         # Create database if not exists
-        if ! runuser -u postgres -- "$pg_bin/psql" -lqt | cut -d \| -f 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -Fxq "$dbname"; then
+        local db_exists=""
+        if ! db_exists=$(runuser -u postgres -- "$pg_bin/psql" -tAc \
+             "SELECT 1 FROM pg_database WHERE datname='${dbname}'" 2>>"$pg_log"); then
+            log_error "Database lookup ${dbname} failed (see $pg_log)"
+            failed=$((failed + 1))
+            continue
+        fi
+        db_exists=$(printf '%s' "$db_exists" | tr -d '[:space:]')
+
+        if [ "$db_exists" != "1" ]; then
             if runuser -u postgres -- "$pg_bin/createdb" -O "$owner" "$dbname" >> "$pg_log" 2>&1; then
                 created=$((created + 1))
             else
@@ -454,20 +471,26 @@ mkdir -p /etc/systemd/journald.conf.d
 # from this entrypoint process) and continues running as an orphan re-parented
 # to systemd after exec.  systemd does not kill orphaned processes during
 # normal operation; they are only cleaned up on container shutdown.
-(
-    # Wait for journald's socket — it becomes available a few seconds
-    # after systemd starts journald.service.
-    i=0
-    while [ $i -lt 60 ] && [ ! -S /run/systemd/journal/socket ]; do
-        sleep 1
-        i=$((i + 1))
-    done
-    if [ ! -S /run/systemd/journal/socket ]; then
-        printf '[journal-forwarder] journald socket not available after 60 s\n' >&2
-        exit 0
-    fi
-    exec journalctl -f --output=short-iso-precise --no-hostname 2>/dev/null
-) &
+# A /run lock makes this idempotent if the entrypoint is ever re-entered in the
+# same container lifecycle.
+JOURNAL_FORWARDER_LOCK="/run/uos-journal-forwarder.lock"
+if [ ! -e "$JOURNAL_FORWARDER_LOCK" ]; then
+    : > "$JOURNAL_FORWARDER_LOCK"
+    (
+        # Wait for journald's socket — it becomes available a few seconds
+        # after systemd starts journald.service.
+        i=0
+        while [ $i -lt 60 ] && [ ! -S /run/systemd/journal/socket ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        if [ ! -S /run/systemd/journal/socket ]; then
+            printf '[journal-forwarder] journald socket not available after 60 s\n' >&2
+            exit 0
+        fi
+        exec journalctl -f --output=short-iso-precise --no-hostname 2>/dev/null
+    ) &
+fi
 
 # Hand off to systemd (becomes PID 1).
 exec /sbin/init

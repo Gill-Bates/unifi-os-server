@@ -79,9 +79,11 @@ PRESERVE_FAILURE_CONTAINERS="${PRESERVE_FAILURE_CONTAINERS:-true}"
 # Real images are >1500MB; this threshold catches truncated/empty extractions.
 MIN_TAR_SIZE_MB=500
 
-# BUILD_DATE should be set externally for reproducible builds
+# BUILD_DATE should be set externally when the caller wants to control it.
+# Otherwise derive it from the current git commit for reproducible rebuilds,
+# falling back to wall-clock time only when git metadata is unavailable.
 if [[ -z "${BUILD_DATE:-}" ]]; then
-    BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    BUILD_DATE=$(git -C "$REPO_ROOT" log -1 --format=%cI 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
 fi
 
 RED='\033[0;31m'
@@ -99,6 +101,7 @@ amd64_url=""
 arm64_url=""
 declare -a requested_platforms=()
 declare -a arch_image_tags=()
+declare -a arch_validation_results=()
 declare -a cleanup_containers=()
 HOST_ARCH=""
 
@@ -863,7 +866,7 @@ load_extracted_image() {
     # Find what was loaded - prefer image ID comparison over regex parsing
     local after_images new_image loaded_tag
     after_images=$(docker images -q --no-trunc | sort -u)
-    new_image=$(comm -13 <(echo "$before_images") <(echo "$after_images") | head -1)
+    new_image=$(comm -13 <(echo "$before_images") <(echo "$after_images") | sed -n '1p')
 
     if [[ -n "$new_image" ]]; then
         # Found new image by ID comparison - most reliable method
@@ -969,10 +972,11 @@ validate_runtime_image() {
     cleanup_containers+=("$container_name")
 
     # Start container
-    # Note: --privileged is NOT used for runtime. NET_RAW/NET_ADMIN are required for:
-    # - NET_RAW: ICMP ping for network diagnostics
-    # - NET_ADMIN: network interface configuration, iptables rules
-    # These were determined by testing with --cap-drop ALL and incrementally adding.
+    # Note: --privileged is NOT used for runtime.
+    # NET_RAW/NET_ADMIN are the currently assumed minimal capabilities for ICMP,
+    # network interface configuration, and iptables-related operations.
+    # The verified hard startup requirement is the rw /sys/fs/cgroup mount.
+    # A real capability-minimization regression test is still future work.
     docker run -d \
         --name "$container_name" \
         --platform "linux/${arch}" \
@@ -982,7 +986,6 @@ validate_runtime_image() {
         --tmpfs /run:exec \
         --tmpfs /run/lock \
         --tmpfs /tmp:exec \
-        --tmpfs /var/lib/journal \
         -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
         "$image_tag" >/dev/null
 
@@ -1252,6 +1255,7 @@ build_arch_image() {
     else
         warn "Skipping validation (SKIP_VALIDATION=true)"
     fi
+    arch_validation_results+=("$validation_result")
 
     # Push if requested — refuse degraded images unless explicitly overridden.
     if [[ "$PUSH" == "true" ]]; then
@@ -1290,12 +1294,30 @@ publish_manifests() {
         return
     fi
 
+    if (( ${#arch_validation_results[@]} != ${#arch_image_tags[@]} )); then
+        fatal "Validation result tracking mismatch: ${#arch_validation_results[@]} result(s) for ${#arch_image_tags[@]} image(s)"
+    fi
+
+    local validation_result
+    for validation_result in "${arch_validation_results[@]}"; do
+        if [[ "$validation_result" == "degraded" && "${ALLOW_DEGRADED_PUBLISH:-false}" != "true" ]]; then
+            fatal "Refusing to publish manifests: a build is degraded"
+        fi
+    done
+
     if (( ${#arch_image_tags[@]} == 1 )); then
+        local version_tag="${IMAGE_NAME}:${VERSION}"
+        local latest_tag="${IMAGE_NAME}:latest"
+
         log "Publishing single-arch tags"
-        docker tag "${arch_image_tags[0]}" "${IMAGE_NAME}:${VERSION}"
-        docker tag "${arch_image_tags[0]}" "${IMAGE_NAME}:latest"
-        docker push "${IMAGE_NAME}:${VERSION}"
-        docker push "${IMAGE_NAME}:latest"
+        if ! docker image inspect "$version_tag" >/dev/null 2>&1; then
+            docker tag "${arch_image_tags[0]}" "$version_tag"
+        fi
+        if ! docker image inspect "$latest_tag" >/dev/null 2>&1; then
+            docker tag "${arch_image_tags[0]}" "$latest_tag"
+        fi
+        docker push "$version_tag"
+        docker push "$latest_tag"
         return
     fi
 
@@ -1379,7 +1401,7 @@ Environment variables:
     SKIP_VALIDATION        Skip runtime validation (default: false)
     ALLOW_DEGRADED_PUBLISH Push image even when validation result is degraded (default: false)
     BUILD_ARTIFACTS_DIR    Directory for artifacts (default: /tmp/uos-build-PID)
-    BUILD_DATE             ISO8601 timestamp for reproducible builds (default: current time)
+    BUILD_DATE             ISO8601 timestamp for reproducible builds (default: current git commit time, else current time)
     PRESERVE_FAILURE_CONTAINERS  Keep containers on failure for debugging (default: true)
 
 Architecture:
