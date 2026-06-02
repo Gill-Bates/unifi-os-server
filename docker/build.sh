@@ -53,7 +53,7 @@ load_dotenv_defaults() {
         fi
 
         case "$key" in
-            IMAGE_NAME|PLATFORMS|PUSH|DOWNLOAD_API_URL|UNIFI_OS_URL_X64|UNIFI_OS_URL_ARM64|VERSION|BUILD_ARTIFACTS_DIR|BUILD_DATE|PRESERVE_FAILURE_CONTAINERS|SKIP_VALIDATION|EXPORT_FAILURE_FILESYSTEM)
+            IMAGE_NAME|PLATFORMS|PUSH|DOWNLOAD_API_URL|UNIFI_OS_URL_X64|UNIFI_OS_URL_ARM64|VERSION|BUILD_ARTIFACTS_DIR|BUILD_DATE|PRESERVE_FAILURE_CONTAINERS|SKIP_VALIDATION|EXPORT_FAILURE_FILESYSTEM|ALLOW_DEGRADED_PUBLISH)
                 [[ -n "${!key:-}" ]] || printf -v "$key" '%s' "$value"
                 ;;
             *)
@@ -409,6 +409,9 @@ validate_installer_url() {
 
     host="${url#https://}"
     host="${host%%/*}"
+    # Reject userinfo component (e.g. https://ui.com@evil.example/path)
+    # which could bypass the allowlist via credential-in-URL tricks.
+    [[ "$host" == *@* ]] && fatal "Invalid $label URL: userinfo not allowed"
     host="${host%%:*}"
 
     case "$host" in
@@ -1197,6 +1200,8 @@ write_build_provenance() {
             installer_url: $installer_url,
             validation_result: $validation_result,
             capabilities_required: ["NET_ADMIN", "NET_RAW"],
+            runtime_mounts_required: ["/sys/fs/cgroup:rw"],
+            cgroupns: "host",
             phases_completed: {
                 extraction: true,
                 load: true,
@@ -1248,8 +1253,11 @@ build_arch_image() {
         warn "Skipping validation (SKIP_VALIDATION=true)"
     fi
 
-    # Push if requested
+    # Push if requested — refuse degraded images unless explicitly overridden.
     if [[ "$PUSH" == "true" ]]; then
+        if [[ "$validation_result" == "degraded" && "${ALLOW_DEGRADED_PUBLISH:-false}" != "true" ]]; then
+            fatal "Refusing to push degraded image for ${arch}. Set ALLOW_DEGRADED_PUBLISH=true to override."
+        fi
         log "Pushing ${final_tag}"
         docker push "$final_tag" >&2
     fi
@@ -1294,10 +1302,14 @@ publish_manifests() {
     log "Creating multi-arch manifest for ${#arch_image_tags[@]} images"
     docker manifest rm "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1 || true
     docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
+    # Push versioned manifest first; only update latest after it succeeds.
     docker manifest create "${IMAGE_NAME}:${VERSION}" "${arch_image_tags[@]}"
+    docker manifest push "${IMAGE_NAME}:${VERSION}" || fatal "Versioned manifest push failed"
     docker manifest create "${IMAGE_NAME}:latest" "${arch_image_tags[@]}"
-    docker manifest push "${IMAGE_NAME}:${VERSION}"
-    docker manifest push "${IMAGE_NAME}:latest"
+    docker manifest push "${IMAGE_NAME}:latest" || fatal "latest manifest push failed"
+    # Note: arch-specific remote tag cleanup (${VERSION}-amd64 etc.) requires
+    # the Docker Hub API and is handled exclusively by the CI create-manifest job.
+    # build.sh has no Hub credentials and cannot delete remote tags directly.
 }
 
 #######################################
@@ -1365,6 +1377,7 @@ Environment variables:
     PLATFORMS              Target platforms (default: linux/amd64, supports: linux/amd64,linux/arm64)
     PUSH                   Push images (default: true)
     SKIP_VALIDATION        Skip runtime validation (default: false)
+    ALLOW_DEGRADED_PUBLISH Push image even when validation result is degraded (default: false)
     BUILD_ARTIFACTS_DIR    Directory for artifacts (default: /tmp/uos-build-PID)
     BUILD_DATE             ISO8601 timestamp for reproducible builds (default: current time)
     PRESERVE_FAILURE_CONTAINERS  Keep containers on failure for debugging (default: true)
