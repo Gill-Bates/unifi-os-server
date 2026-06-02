@@ -41,7 +41,10 @@ case "$command" in
         if [ -x /usr/bin/systemctl.real ]; then
             exec /usr/bin/systemctl.real "$command" "$@"
         fi
-        echo "[systemctl-stub] unhandled command (exit 0): $command $*" >> "$LOG_FILE" 2>/dev/null || true
-        exit 0
+        # Fail on unknown commands rather than silently returning success.
+        # If a new installer verb breaks the build, add it explicitly above with
+        # a documented rationale — do not widen this catch-all back to exit 0.
+        echo "[systemctl-stub] UNSUPPORTED command (exit 1): $command $*" >> "$LOG_FILE" 2>/dev/null || true
+        exit 1
         ;;
 esac

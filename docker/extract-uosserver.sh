@@ -49,6 +49,9 @@ validate_installer_url() {
 
     host="${url#https://}"
     host="${host%%/*}"
+    # Reject userinfo component (e.g. https://ui.com@evil.example/path)
+    # which could bypass the allowlist via credential-in-URL tricks.
+    [[ "$host" == *@* ]] && error "Invalid UOS_INSTALLER_URL: userinfo not allowed"
     host="${host%%:*}"
 
     case "$host" in
@@ -128,7 +131,8 @@ for (( wait_storage=0; wait_storage < 120; wait_storage+=5 )); do
         fi
     done
 
-    STORAGE_BASE=$(find /home -name "overlay-images" -type d 2>/dev/null | head -1 | sed 's|/overlay-images$||' || true)
+    STORAGE_BASE=$(find /home -maxdepth 4 -path '*/containers/storage/overlay-images' -type d 2>/dev/null \
+        | sort | head -1 | sed 's|/overlay-images$||' || true)
     [[ -n "$STORAGE_BASE" ]] && break
 
     if ! kill -0 "$INSTALLER_PID" 2>/dev/null; then
