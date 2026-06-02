@@ -545,7 +545,21 @@ jobs:
           PRUNED=0
           NEXT="https://hub.docker.com/v2/repositories/${IMAGE_NAME}/images/?page_size=100&status=active"
           while [[ -n "${NEXT}" && "${NEXT}" != "null" ]]; do
-            PAGE=$(curl -fsSL -H "Authorization: Bearer ${HUB_TOKEN}" "${NEXT}")
+            # Use -w to capture HTTP status; do NOT use -f so 404 is handled below
+            # rather than aborting the entire step.
+            HTTP_STATUS=""
+            PAGE=$(curl -sSL -w '\n%{http_code}' -H "Authorization: Bearer ${HUB_TOKEN}" "${NEXT}")
+            HTTP_STATUS=$(echo "${PAGE}" | tail -1)
+            PAGE=$(echo "${PAGE}" | head -n -1)
+
+            if [[ "${HTTP_STATUS}" == "404" ]]; then
+              echo "Images API returned 404 — no untagged image objects present."
+              break
+            fi
+            if [[ "${HTTP_STATUS}" != "200" ]]; then
+              echo "WARNING: Images API returned HTTP ${HTTP_STATUS}; skipping prune." >&2
+              break
+            fi
 
             while read -r DIGEST; do
               [[ -n "${DIGEST}" ]] || continue

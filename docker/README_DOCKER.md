@@ -2,45 +2,39 @@
   <img
     src="https://cdn.prod.website-files.com/622b70d8906c7ab0c03f77f8/69a26cf6852702887e7150f0_63b40a92093c6b2f3767e4e6_tMCv8T-y_400x400.png"
     alt="UniFi Logo"
-    width="140"
-    style="border-radius:24px;"
+    width="180"
+    style="border-radius: 24px;"
   >
+</p>
+
+<h1 align="center">UniFi OS Server for Docker Compose</h1>
+
+---
+
+<p align="center">
+  Run UniFi OS Server in a Docker container with persistent storage, systemd support, and multi-architecture images.
 </p>
 
 <p align="center">
   <a href="https://github.com/Gill-Bates/unifi-os-server/releases">
-    <img src="https://img.shields.io/github/v/tag/Gill-Bates/unifi-os-server?label=version&color=0066cc" alt="Latest Version">
+    <img src="https://img.shields.io/github/v/tag/Gill-Bates/unifi-os-server?label=version&color=blue" alt="Latest Version">
   </a>
-  <a href="https://hub.docker.com/r/giiibates/unifi-os-server">
-    <img src="https://img.shields.io/docker/v/giiibates/unifi-os-server?sort=semver&label=docker%20hub&color=0db7ed" alt="Docker Hub Version">
-  </a>
-  <a href="https://hub.docker.com/r/giiibates/unifi-os-server">
-    <img src="https://img.shields.io/docker/pulls/giiibates/unifi-os-server" alt="Docker Pulls">
-  </a>
-  <a href="https://hub.docker.com/r/giiibates/unifi-os-server">
-    <img src="https://img.shields.io/docker/image-size/giiibates/unifi-os-server/latest?label=image%20size" alt="Image Size">
-  </a>
-  <br>
   <a href="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/docker-build.yml">
     <img src="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/docker-build.yml/badge.svg" alt="Docker Build">
   </a>
   <a href="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/check-updates.yml">
     <img src="https://github.com/Gill-Bates/unifi-os-server/actions/workflows/check-updates.yml/badge.svg" alt="Check Updates">
   </a>
-  <a href="https://github.com/Gill-Bates/unifi-os-server/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/Gill-Bates/unifi-os-server" alt="License">
+  <a href="https://hub.docker.com/r/giiibates/unifi-os-server">
+    <img src="https://img.shields.io/docker/pulls/giiibates/unifi-os-server" alt="Docker Pulls">
   </a>
-  <img src="https://img.shields.io/badge/platform-linux%2Famd64%20%7C%20linux%2Farm64-lightgrey" alt="Platforms">
 </p>
-
-<center>
-<h1>UniFi OS Server</h1>
-</center>
-
 <p align="center">
 Unofficial Docker image for running <strong>UniFi OS Server</strong> with Docker Compose.<br>
 Built from the official UniFi OS Server software distributed by Ubiquiti — the internal <code>uosserver</code> image is extracted from the official installer and wrapped into a Docker runtime image.
 </p>
+
+---
 
 ## Tags
 
