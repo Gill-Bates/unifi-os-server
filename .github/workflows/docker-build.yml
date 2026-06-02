@@ -12,13 +12,11 @@ on:
           - 'true'
           - 'false'
       platforms:
-        description: 'Platforms to build'
+        description: 'Platforms to build (multi-arch only)'
         required: false
         default: 'linux/amd64,linux/arm64'  # Native runners available for both
         type: choice
         options:
-          - 'linux/amd64'
-          - 'linux/arm64'
           - 'linux/amd64,linux/arm64'
       version:
         description: 'Pinned UniFi OS version (optional)'
@@ -56,7 +54,7 @@ jobs:
   build-amd64:
     name: Build amd64 image
     runs-on: ubuntu-24.04
-    if: github.event.inputs.platforms == 'linux/amd64' || github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
+    if: github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
     outputs:
       version: ${{ steps.build.outputs.version }}
       trivy_summary: ${{ steps.trivy_summary.outputs.summary }}
@@ -224,7 +222,7 @@ jobs:
   build-arm64:
     name: Build arm64 image
     runs-on: ubuntu-24.04-arm  # Native arm64 runner - no QEMU emulation needed
-    if: github.event.inputs.platforms == 'linux/arm64' || github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
+    if: github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
     outputs:
       version: ${{ steps.build.outputs.version }}
       trivy_summary: ${{ steps.trivy_summary.outputs.summary }}
@@ -412,9 +410,16 @@ jobs:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
+          LOGIN_PAYLOAD="$(
+            jq -nc \
+              --arg username "$DOCKERHUB_USERNAME" \
+              --arg password "$DOCKERHUB_PASSWORD" \
+              '{username: $username, password: $password}'
+          )"
+
           LOGIN_RESPONSE=$(curl -fsSL -X POST \
             -H "Content-Type: application/json" \
-            -d "{\"username\": \"${DOCKERHUB_USERNAME}\", \"password\": \"${DOCKERHUB_PASSWORD}\"}" \
+            -d "${LOGIN_PAYLOAD}" \
             https://hub.docker.com/v2/users/login/)
           TOKEN=$(echo "${LOGIN_RESPONSE}" | jq -r '.token // empty')
           if [[ -z "${TOKEN}" ]]; then
@@ -424,26 +429,6 @@ jobs:
           # Mask so the token never appears in logs, then expose to later steps.
           echo "::add-mask::${TOKEN}"
           echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
-
-      - name: Delete existing manifest tags from Docker Hub (idempotency)
-        env:
-          HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
-        run: |
-          VERSION="${{ needs.build-amd64.outputs.version }}"
-
-          for TAG in "${VERSION}" "latest"; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-              -H "Authorization: Bearer ${HUB_TOKEN}" \
-              "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${TAG}/")
-            if [[ "${STATUS}" == "200" || "${STATUS}" == "204" ]]; then
-              echo "Deleted existing manifest tag: ${TAG}"
-            elif [[ "${STATUS}" == "404" ]]; then
-              echo "Manifest tag not found (first build?): ${TAG}"
-            else
-              echo "Unexpected HTTP ${STATUS} when deleting manifest tag: ${TAG}" >&2
-              exit 1
-            fi
-          done
 
       - name: Create and push manifest
         run: |
@@ -476,7 +461,10 @@ jobs:
           fi
           
           echo "Creating manifest with: ${IMAGES[*]}"
-          
+
+          # Keep the currently published stable tags in place until the new
+          # manifest has been pushed successfully. Replacing a tag is safe;
+          # deleting it first creates avoidable downtime if the push fails.
           docker manifest rm "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1 || true
           docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
 
@@ -513,16 +501,17 @@ jobs:
             fi
           done
 
-      - name: Prune untagged digests from Docker Hub
+      - name: Prune untagged digests from Docker Hub (disabled pending validation)
+        if: ${{ false }}
         env:
           HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
         run: |
           set -euo pipefail
 
-          # Tag deletion only removes the tag reference; the underlying image
-          # object (digest) stays in the repo as an untagged orphan.  This step
-          # uses Docker Hub's namespaces API with status=inactive to enumerate
-          # and delete those orphans directly.
+          # Disabled until Docker Hub's inactive image semantics are validated
+          # against multi-arch manifest references with an end-to-end pull test.
+          # An over-broad prune here risks deleting image objects that are still
+          # needed by published manifests.
           #
           # API note: the legacy /v2/repositories/{ns}/{repo}/images/ path returns
           # 404 for free-plan repos.  The correct endpoint is:
