@@ -7,3 +7,4 @@ full_codebase*
 .env
 data/
 *.tar
+.claude/

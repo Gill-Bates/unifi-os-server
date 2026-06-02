@@ -580,6 +580,11 @@ jobs:
           TRIVY_AMD64: ${{ needs.build-amd64.outputs.trivy_summary }}
           TRIVY_ARM64: ${{ needs.build-arm64.outputs.trivy_summary }}
         with:
+          # Prefer a dedicated PAT/fine-grained token when available. Creating
+          # or moving release tags for commits that modify workflow files can
+          # require workflows:write in addition to contents:write, which the
+          # default GITHUB_TOKEN does not reliably provide.
+          github-token: ${{ secrets.RELEASE_TOKEN != '' && secrets.RELEASE_TOKEN || github.token }}
           script: |
             const version = process.env.VERSION;
             const tagName = 'v' + version;
@@ -591,11 +596,24 @@ jobs:
               throw new Error('VERSION is empty - cannot create release');
             }
             const imageName = 'giiibates/unifi-os-server';
+            const releaseName = 'UniFi OS Server ' + version;
             const runId = context.runId;
             const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
             const downloadApiUrl = 'https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server';
             const defaultReleaseNotesUrl = `https://community.ui.com/releases/r/uosserver/${version}`;
             const externalTimeoutMs = 15000;
+
+            function rethrowWithReleasePermissionHint(error) {
+              if (error && error.status === 403) {
+                throw new Error(
+                  'GitHub release mutation was denied (403 Resource not accessible by integration). ' +
+                  'Configure repository secret RELEASE_TOKEN with contents:write and workflows:write ' +
+                  '(or classic repo + workflow scope). The default GITHUB_TOKEN is not sufficient ' +
+                  'for all release/tag update paths, especially when tagging commits that modify workflow files.'
+                );
+              }
+              throw error;
+            }
 
             async function resolveTrivyArtifactLinks() {
               const findings = {
@@ -906,43 +924,114 @@ jobs:
               }
             }
 
-            await upsertTag();
-
-            // --- Release erstellen oder vorhandenen ersetzen ---
             try {
-              await github.rest.repos.createRelease({
+              await upsertTag();
+            } catch (error) {
+              rethrowWithReleasePermissionHint(error);
+            }
+
+            async function findMatchingReleases() {
+              const releases = await github.paginate(github.rest.repos.listReleases, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                tag_name: tagName,
-                target_commitish: sha,
-                name: 'UniFi OS Server ' + version,
-                body: body,
-                draft: false,
-                prerelease: false,
-                make_latest: 'true'
+                per_page: 100
               });
-              console.log('Created release ' + tagName);
-            } catch (e) {
-              if (e.status === 422) {
-                console.log('Release ' + tagName + ' already exists, updating...');
-                const { data: release } = await github.rest.repos.getReleaseByTag({
+
+              return releases
+                .filter((release) => release && (release.tag_name === tagName || release.name === releaseName))
+                .sort((left, right) => new Date(left.created_at) - new Date(right.created_at));
+            }
+
+            function pickCanonicalRelease(releases) {
+              if (!Array.isArray(releases) || releases.length === 0) {
+                return null;
+              }
+
+              return (
+                releases.find((release) => release.tag_name === tagName && !release.draft) ||
+                releases.find((release) => release.tag_name === tagName) ||
+                releases.find((release) => release.name === releaseName && !release.draft) ||
+                releases[0]
+              );
+            }
+
+            async function deleteDuplicateReleases(primaryRelease, releases) {
+              for (const release of releases) {
+                if (!release || release.id === primaryRelease.id) {
+                  continue;
+                }
+                await github.rest.repos.deleteRelease({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  tag: tagName
+                  release_id: release.id
                 });
+                console.log(`Deleted duplicate release ${release.id} (${release.tag_name || 'no-tag'})`);
+              }
+            }
+
+            async function upsertRelease() {
+              const matchingReleases = await findMatchingReleases();
+              const existingRelease = pickCanonicalRelease(matchingReleases);
+
+              if (existingRelease) {
                 await github.rest.repos.updateRelease({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  release_id: release.id,
+                  release_id: existingRelease.id,
                   tag_name: tagName,
-                  name: 'UniFi OS Server ' + version,
+                  name: releaseName,
                   body: body,
                   draft: false,
                   prerelease: false,
                   make_latest: 'true'
                 });
-                console.log('Updated release ' + tagName);
-              } else {
-                throw e;
+                console.log(`Updated release ${existingRelease.id} for ${tagName}`);
+                await deleteDuplicateReleases(existingRelease, matchingReleases);
+                return;
               }
+
+              try {
+                const { data: createdRelease } = await github.rest.repos.createRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_name: tagName,
+                  target_commitish: sha,
+                  name: releaseName,
+                  body: body,
+                  draft: false,
+                  prerelease: false,
+                  make_latest: 'true'
+                });
+                console.log(`Created release ${createdRelease.id} for ${tagName}`);
+              } catch (e) {
+                if (e.status !== 422) {
+                  throw e;
+                }
+
+                const retryMatches = await findMatchingReleases();
+                const retryRelease = pickCanonicalRelease(retryMatches);
+                if (!retryRelease) {
+                  throw e;
+                }
+
+                await github.rest.repos.updateRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: retryRelease.id,
+                  tag_name: tagName,
+                  name: releaseName,
+                  body: body,
+                  draft: false,
+                  prerelease: false,
+                  make_latest: 'true'
+                });
+                console.log(`Updated release ${retryRelease.id} for ${tagName} after 422 retry`);
+                await deleteDuplicateReleases(retryRelease, retryMatches);
+              }
+            }
+
+            try {
+              await upsertRelease();
+            } catch (error) {
+              rethrowWithReleasePermissionHint(error);
             }
