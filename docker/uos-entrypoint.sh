@@ -434,21 +434,40 @@ log_section "Starting Services"
 log_info "Handing off to systemd..."
 printf "\n  ${C_GRAY}──────────────────────────────────────────────${C_RESET}\n\n"
 
-# Forward systemd journal to docker logs.
-# ForwardToConsole=yes normally writes to /dev/console (the kernel TTY device).
-# In Docker without -t, /dev/console is not connected to the log driver's pipe.
-# TTYPath=/dev/stdout redirects journal output to journald's own fd 1, which is
-# inherited from PID 1, which is inherited from the original entrypoint process —
-# the same fd that Docker's log driver captures regardless of whether a TTY is
-# allocated.
+# Keep journal in RAM only — no on-disk journal needed in a container.
 mkdir -p /etc/systemd/journald.conf.d
 {
     echo "[Journal]"
     echo "Storage=volatile"
-    echo "ForwardToConsole=yes"
-    echo "MaxLevelConsole=info"
-    echo "TTYPath=/dev/stdout"
-} > /etc/systemd/journald.conf.d/docker-console.conf
+} > /etc/systemd/journald.conf.d/docker.conf
 
-# Start systemd
+# Forward journal output to Docker logs.
+#
+# Why not TTYPath=/dev/stdout in journald.conf?
+# When systemd starts journald as a service, it sets up journald's stdio
+# independently (not inheriting PID 1's fds).  Opening /dev/stdout from
+# inside journald reaches journald's own fd 1, not Docker's log pipe —
+# so nothing appears in `docker logs`.
+#
+# Instead, start a journalctl follower HERE, before exec'ing into systemd.
+# The subshell retains its own copy of fd 1 (= Docker's log pipe, inherited
+# from this entrypoint process) and continues running as an orphan re-parented
+# to systemd after exec.  systemd does not kill orphaned processes during
+# normal operation; they are only cleaned up on container shutdown.
+(
+    # Wait for journald's socket — it becomes available a few seconds
+    # after systemd starts journald.service.
+    i=0
+    while [ $i -lt 60 ] && [ ! -S /run/systemd/journal/socket ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if [ ! -S /run/systemd/journal/socket ]; then
+        printf '[journal-forwarder] journald socket not available after 60 s\n' >&2
+        exit 0
+    fi
+    exec journalctl -f --output=short-iso-precise --no-hostname 2>/dev/null
+) &
+
+# Hand off to systemd (becomes PID 1).
 exec /sbin/init
