@@ -406,5 +406,14 @@ log_section "Starting Services"
 log_info "Handing off to systemd..."
 printf "\n  ${C_GRAY}──────────────────────────────────────────────${C_RESET}\n\n"
 
+# Forward systemd journal to console so docker logs shows service activity
+mkdir -p /etc/systemd/journald.conf.d
+{
+    echo "[Journal]"
+    echo "Storage=volatile"
+    echo "ForwardToConsole=yes"
+    echo "MaxLevelConsole=info"
+} > /etc/systemd/journald.conf.d/docker-console.conf
+
 # Start systemd
 exec /sbin/init

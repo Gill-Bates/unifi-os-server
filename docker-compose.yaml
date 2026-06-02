@@ -39,6 +39,7 @@ services:
       - ./data/data:/data
       - ./data/srv:/srv
       - ./data/var-lib-unifi:/var/lib/unifi
+      - ./data/var-lib-postgresql:/var/lib/postgresql
       - ./data/var-lib-mongodb:/var/lib/mongodb
       - ./data/etc-rabbitmq-ssl:/etc/rabbitmq/ssl
     ports:
