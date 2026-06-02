@@ -501,38 +501,87 @@ jobs:
             fi
           done
 
-      - name: Prune untagged digests from Docker Hub (disabled pending validation)
-        if: ${{ false }}
+      - name: Prune stale untagged Docker Hub image objects
         env:
           HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
         run: |
           set -euo pipefail
 
-          # Disabled until Docker Hub's inactive image semantics are validated
-          # against multi-arch manifest references with an end-to-end pull test.
-          # An over-broad prune here risks deleting image objects that are still
-          # needed by published manifests.
+          VERSION="${{ needs.build-amd64.outputs.version }}"
           #
-          # API note: the legacy /v2/repositories/{ns}/{repo}/images/ path returns
-          # 404 for free-plan repos.  The correct endpoint is:
-          #   /v2/namespaces/{ns}/repositories/{repo}/images?status=inactive
-          # where "inactive" = untagged (no current tag reference).
+          # Multi-arch tags are an OCI/Docker image index plus child platform
+          # manifests. After deleting the intermediate -amd64/-arm64 tags, the
+          # child manifests often show up as inactive, but the published VERSION
+          # and latest index still reference them. Protect the currently
+          # published index digest(s) and child manifest digest(s) first, then
+          # delete only older inactive image objects.
 
           NAMESPACE="${IMAGE_NAME%%/*}"
           REPO="${IMAGE_NAME#*/}"
           IMAGES_BASE="https://hub.docker.com/v2/namespaces/${NAMESPACE}/repositories/${REPO}/images"
+          REGISTRY_TOKEN="$(
+            curl -fsSL \
+              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAME}:pull" \
+              | jq -r '.token // empty'
+          )"
+
+          if [[ -z "${REGISTRY_TOKEN}" ]]; then
+            echo "Failed to obtain Docker registry pull token" >&2
+            exit 1
+          fi
+
+          ACCEPT_HEADER='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "${tmpdir}"' EXIT
+          protected="${tmpdir}/protected-digests.txt"
+          : > "${protected}"
+
+          collect_protected_digests() {
+            local tag="$1"
+            local manifest_file="${tmpdir}/manifest-${tag}.json"
+            local headers
+
+            headers="$(
+              curl -fsSIL \
+                -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+                -H "Accept: ${ACCEPT_HEADER}" \
+                "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${tag}"
+            )"
+
+            echo "${headers}" \
+              | awk 'BEGIN{IGNORECASE=1} /^docker-content-digest:/ {gsub(/\r/, ""); print $2}' \
+              >> "${protected}"
+
+            curl -fsSL \
+              -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+              -H "Accept: ${ACCEPT_HEADER}" \
+              "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${tag}" \
+              -o "${manifest_file}"
+
+            jq -r '.manifests[]?.digest // empty' "${manifest_file}" >> "${protected}"
+          }
+
+          collect_protected_digests "${VERSION}"
+          collect_protected_digests "latest"
+
+          sort -u "${protected}" -o "${protected}"
+          echo "Protected digests:"
+          sed 's/^/  /' "${protected}"
 
           PRUNED=0
           NEXT="${IMAGES_BASE}?status=inactive&page_size=100"
           while [[ -n "${NEXT}" && "${NEXT}" != "null" ]]; do
-            PAGE=$(curl -sSL -w '\n%{http_code}' \
-              -H "Authorization: Bearer ${HUB_TOKEN}" \
-              "${NEXT}")
-            HTTP_STATUS=$(echo "${PAGE}" | tail -1)
-            PAGE=$(echo "${PAGE}" | head -n -1)
+            PAGE_WITH_STATUS="$(
+              curl -sS -w '\n%{http_code}' \
+                -H "Authorization: Bearer ${HUB_TOKEN}" \
+                "${NEXT}"
+            )"
+            HTTP_STATUS="$(echo "${PAGE_WITH_STATUS}" | tail -n 1)"
+            PAGE="$(echo "${PAGE_WITH_STATUS}" | sed '$d')"
 
             if [[ "${HTTP_STATUS}" == "404" ]]; then
-              echo "Inactive images API returned 404 — no orphaned image objects or feature unavailable for this plan."
+              echo "Inactive images API returned 404 — feature unavailable or no inactive image objects."
               break
             fi
             if [[ "${HTTP_STATUS}" != "200" ]]; then
@@ -540,16 +589,24 @@ jobs:
               break
             fi
 
-            COUNT=$(echo "${PAGE}" | jq -r '.count // 0')
+            COUNT="$(echo "${PAGE}" | jq -r '.count // 0')"
             echo "Inactive (untagged) image objects found: ${COUNT}"
 
             while read -r DIGEST; do
               [[ -n "${DIGEST}" ]] || continue
-              STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-                -H "Authorization: Bearer ${HUB_TOKEN}" \
-                "${IMAGES_BASE}/${DIGEST}/")
+
+              if grep -qxF "${DIGEST}" "${protected}"; then
+                echo "Keeping currently published digest: ${DIGEST}"
+                continue
+              fi
+
+              STATUS="$(
+                curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+                  -H "Authorization: Bearer ${HUB_TOKEN}" \
+                  "${IMAGES_BASE}/${DIGEST}/"
+              )"
               if [[ "${STATUS}" == "200" || "${STATUS}" == "202" || "${STATUS}" == "204" ]]; then
-                echo "Pruned: ${DIGEST} (HTTP ${STATUS})"
+                echo "Pruned stale inactive image object: ${DIGEST}"
                 PRUNED=$((PRUNED + 1))
               elif [[ "${STATUS}" == "404" ]]; then
                 echo "Already gone: ${DIGEST}"
@@ -561,7 +618,7 @@ jobs:
             NEXT=$(echo "${PAGE}" | jq -r '.next // empty')
           done
 
-          echo "Pruned ${PRUNED} untagged digest(s)."
+          echo "Pruned ${PRUNED} stale inactive image object(s)."
 
   create-release:
     name: Create GitHub Release
