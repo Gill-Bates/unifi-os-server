@@ -53,7 +53,7 @@ load_dotenv_defaults() {
         fi
 
         case "$key" in
-            IMAGE_NAME|PLATFORMS|PUSH|DOWNLOAD_API_URL|UNIFI_OS_URL_X64|UNIFI_OS_URL_ARM64|VERSION|BUILD_ARTIFACTS_DIR|BUILD_DATE|PRESERVE_FAILURE_CONTAINERS|SKIP_VALIDATION|EXPORT_FAILURE_FILESYSTEM|ALLOW_DEGRADED_PUBLISH)
+            IMAGE_NAME|PLATFORMS|PUSH|PROMOTE_LATEST|DOWNLOAD_API_URL|UNIFI_OS_URL_X64|UNIFI_OS_URL_ARM64|VERSION|BUILD_ARTIFACTS_DIR|BUILD_DATE|PRESERVE_FAILURE_CONTAINERS|SKIP_VALIDATION|EXPORT_FAILURE_FILESYSTEM|ALLOW_DEGRADED_PUBLISH)
                 [[ -n "${!key:-}" ]] || printf -v "$key" '%s' "$value"
                 ;;
             *)
@@ -71,9 +71,14 @@ IMAGE_NAME="${IMAGE_NAME:-giiibates/unifi-os-server}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 PUSH="${PUSH:-true}"
 VERSION="${VERSION:-}"
+PROMOTE_LATEST="${PROMOTE_LATEST:-auto}"
 BUILD_ARTIFACTS_DIR="${BUILD_ARTIFACTS_DIR:-/tmp/uos-build-$$}"
 DOWNLOAD_API_URL="${DOWNLOAD_API_URL:-https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server}"
 PRESERVE_FAILURE_CONTAINERS="${PRESERVE_FAILURE_CONTAINERS:-true}"
+PINNED_BUILD_INPUT=false
+if [[ -n "$VERSION" || -n "${UNIFI_OS_URL_X64:-}" || -n "${UNIFI_OS_URL_ARM64:-}" ]]; then
+    PINNED_BUILD_INPUT=true
+fi
 
 # Minimum tar size for a valid uosserver image (MB).
 # Real images are >1500MB; this threshold catches truncated/empty extractions.
@@ -104,6 +109,7 @@ declare -a arch_image_tags=()
 declare -a arch_validation_results=()
 declare -a cleanup_containers=()
 HOST_ARCH=""
+PUBLISHED_LATEST=false
 
 #######################################
 # LOGGING (all to stderr to not pollute stdout for return values)
@@ -384,7 +390,7 @@ require_cmd() {
 extract_version_from_url() {
     local url="$1"
     local version
-    version="$(sed -E 's|.*-([0-9]+\.[0-9]+\.[0-9]+)-.*|\1|' <<<"$url")"
+    version="$(sed -E 's|.*-([0-9]+(\.[0-9]+){2,3})-.*|\1|' <<<"$url")"
     [[ -n "$version" && "$version" != "$url" ]] || fatal "Could not derive version from URL: $url"
     printf '%s\n' "$version"
 }
@@ -401,6 +407,168 @@ validate_api_url() {
         https://download.svc.ui.com/*) ;;
         *) fatal "Invalid DOWNLOAD_API_URL host: $url" ;;
     esac
+}
+
+version_ge() {
+    local candidate="$1"
+    local baseline="$2"
+
+    [[ "$(printf '%s\n%s\n' "$baseline" "$candidate" | sort -V | tail -n 1)" == "$candidate" ]]
+}
+
+docker_hub_repo_path() {
+    local image="$IMAGE_NAME"
+    local first_component="${image%%/*}"
+
+    if [[ "$image" == docker.io/* ]]; then
+        image="${image#docker.io/}"
+    elif [[ "$image" == registry-1.docker.io/* ]]; then
+        image="${image#registry-1.docker.io/}"
+    elif [[ "$first_component" == *.* || "$first_component" == *:* || "$first_component" == "localhost" ]]; then
+        return 1
+    fi
+
+    if [[ "$image" != */* ]]; then
+        image="library/${image}"
+    fi
+
+    printf '%s\n' "$image"
+}
+
+fetch_docker_hub_token() {
+    local repo="$1"
+    local token
+
+    token="$(
+        curl -fsSL \
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
+            | jq -r '.token // empty'
+    )" || return 1
+
+    [[ -n "$token" ]] || return 1
+    printf '%s\n' "$token"
+}
+
+fetch_registry_json() {
+    local url="$1"
+    local token="$2"
+    local accept_header="${3:-application/json}"
+    local response status body
+
+    response="$(
+        curl -sS -w '\n%{http_code}' \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: ${accept_header}" \
+            "$url"
+    )" || return 1
+
+    status="$(tail -n 1 <<< "$response")"
+    body="$(sed '$d' <<< "$response")"
+
+    case "$status" in
+        200)
+            printf '%s\n' "$body"
+            ;;
+        404)
+            return 2
+            ;;
+        *)
+            warn "Registry request failed with HTTP ${status}: ${url}"
+            return 1
+            ;;
+    esac
+}
+
+fetch_current_latest_version() {
+    local repo token manifest child_digest child_manifest config_digest config version
+    local accept_header='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+
+    repo="$(docker_hub_repo_path)" || return 3
+    token="$(fetch_docker_hub_token "$repo")" || return 1
+
+    manifest="$(
+        fetch_registry_json \
+            "https://registry-1.docker.io/v2/${repo}/manifests/latest" \
+            "$token" \
+            "$accept_header"
+    )" || return $?
+
+    child_digest="$(jq -r '.manifests[]? | select(.platform.architecture == "amd64") | .digest' <<< "$manifest" | head -n 1)"
+    if [[ -z "$child_digest" ]]; then
+        child_digest="$(jq -r '.manifests[0]?.digest // empty' <<< "$manifest")"
+    fi
+
+    if [[ -n "$child_digest" ]]; then
+        child_manifest="$(
+            fetch_registry_json \
+                "https://registry-1.docker.io/v2/${repo}/manifests/${child_digest}" \
+                "$token" \
+                "$accept_header"
+        )" || return 1
+    else
+        child_manifest="$manifest"
+    fi
+
+    config_digest="$(jq -r '.config.digest // empty' <<< "$child_manifest")"
+    [[ -n "$config_digest" ]] || return 1
+
+    config="$(
+        fetch_registry_json \
+            "https://registry-1.docker.io/v2/${repo}/blobs/${config_digest}" \
+            "$token"
+    )" || return 1
+
+    version="$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' <<< "$config")"
+    [[ "$version" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]] || return 1
+    printf '%s\n' "$version"
+}
+
+resolve_promote_latest() {
+    local promote current_latest status
+
+    case "$PROMOTE_LATEST" in
+        true)
+            promote=true
+            ;;
+        false)
+            promote=false
+            ;;
+        auto)
+            if [[ "$PINNED_BUILD_INPUT" == "true" ]]; then
+                promote=false
+            else
+                promote=true
+            fi
+            ;;
+        *)
+            fatal "Invalid PROMOTE_LATEST: $PROMOTE_LATEST (expected: auto, true, false)"
+            ;;
+    esac
+
+    if [[ "$promote" == "true" ]]; then
+        if current_latest="$(fetch_current_latest_version)"; then
+            log "Current latest version: ${current_latest}"
+            if ! version_ge "$VERSION" "$current_latest"; then
+                warn "Refusing to move latest backward: built ${VERSION}, current latest ${current_latest}"
+                promote=false
+            fi
+        else
+            status=$?
+            case "$status" in
+                2)
+                    log "No current latest manifest found; latest promotion is allowed"
+                    ;;
+                3)
+                    fatal "Cannot verify latest version for non-Docker-Hub IMAGE_NAME (${IMAGE_NAME}); set PROMOTE_LATEST=false"
+                    ;;
+                *)
+                    fatal "Current latest version could not be resolved; refusing latest promotion"
+                    ;;
+            esac
+        fi
+    fi
+
+    printf '%s\n' "$promote"
 }
 
 validate_installer_url() {
@@ -851,7 +1019,7 @@ load_extracted_image() {
 
     # Capture images before load to determine what's new
     local before_images
-    before_images=$(docker images -q --no-trunc | sort -u)
+    before_images=$(docker images -q --no-trunc | sort -u) || fatal "Failed to list Docker images before load"
 
     # Load the image
     local load_output
@@ -865,7 +1033,8 @@ load_extracted_image() {
 
     # Find what was loaded - prefer image ID comparison over regex parsing
     local after_images new_image loaded_tag
-    after_images=$(docker images -q --no-trunc | sort -u)
+    after_images=$(docker images -q --no-trunc | sort -u) || fatal "Failed to list Docker images after load"
+    [[ -n "$after_images" ]] || fatal "No Docker images found after load"
     new_image=$(comm -13 <(echo "$before_images") <(echo "$after_images") | sed -n '1p')
 
     if [[ -n "$new_image" ]]; then
@@ -1305,30 +1474,43 @@ publish_manifests() {
         fi
     done
 
+    local promote_latest
+    promote_latest="$(resolve_promote_latest)"
+    log "Promote latest: ${promote_latest}"
+
     if (( ${#arch_image_tags[@]} == 1 )); then
         local version_tag="${IMAGE_NAME}:${VERSION}"
         local latest_tag="${IMAGE_NAME}:latest"
 
         log "Publishing single-arch tags"
-        if ! docker image inspect "$version_tag" >/dev/null 2>&1; then
-            docker tag "${arch_image_tags[0]}" "$version_tag"
-        fi
-        if ! docker image inspect "$latest_tag" >/dev/null 2>&1; then
-            docker tag "${arch_image_tags[0]}" "$latest_tag"
-        fi
+        docker tag "${arch_image_tags[0]}" "$version_tag"
         docker push "$version_tag"
-        docker push "$latest_tag"
+
+        if [[ "$promote_latest" == "true" ]]; then
+            docker tag "${arch_image_tags[0]}" "$latest_tag"
+            docker push "$latest_tag"
+            PUBLISHED_LATEST=true
+        else
+            log "Skipped latest tag promotion"
+        fi
         return
     fi
 
     log "Creating multi-arch manifest for ${#arch_image_tags[@]} images"
     docker manifest rm "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1 || true
-    docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
+    if [[ "$promote_latest" == "true" ]]; then
+        docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
+    fi
     # Push versioned manifest first; only update latest after it succeeds.
     docker manifest create "${IMAGE_NAME}:${VERSION}" "${arch_image_tags[@]}"
     docker manifest push "${IMAGE_NAME}:${VERSION}" || fatal "Versioned manifest push failed"
-    docker manifest create "${IMAGE_NAME}:latest" "${arch_image_tags[@]}"
-    docker manifest push "${IMAGE_NAME}:latest" || fatal "latest manifest push failed"
+    if [[ "$promote_latest" == "true" ]]; then
+        docker manifest create "${IMAGE_NAME}:latest" "${arch_image_tags[@]}"
+        docker manifest push "${IMAGE_NAME}:latest" || fatal "latest manifest push failed"
+        PUBLISHED_LATEST=true
+    else
+        log "Skipped latest manifest promotion"
+    fi
     # Note: arch-specific remote tag cleanup (${VERSION}-amd64 etc.) requires
     # the Docker Hub API and is handled exclusively by the CI create-manifest job.
     # build.sh has no Hub credentials and cannot delete remote tags directly.
@@ -1371,7 +1553,11 @@ main() {
 
     if [[ "$PUSH" == "true" ]]; then
         log "Pushed: ${IMAGE_NAME}:${VERSION}"
-        log "Pushed: ${IMAGE_NAME}:latest"
+        if [[ "$PUBLISHED_LATEST" == "true" ]]; then
+            log "Pushed: ${IMAGE_NAME}:latest"
+        else
+            log "Skipped: ${IMAGE_NAME}:latest"
+        fi
     else
         log "Local images:"
         for tag in "${arch_image_tags[@]}"; do
@@ -1398,6 +1584,7 @@ Environment variables:
     VERSION                Override version tag (derived from URL if not set)
     PLATFORMS              Target platforms (default: linux/amd64, supports: linux/amd64,linux/arm64)
     PUSH                   Push images (default: true)
+    PROMOTE_LATEST         Promote latest tag: auto, true, false (default: auto)
     SKIP_VALIDATION        Skip runtime validation (default: false)
     ALLOW_DEGRADED_PUBLISH Push image even when validation result is degraded (default: false)
     BUILD_ARTIFACTS_DIR    Directory for artifacts (default: /tmp/uos-build-PID)

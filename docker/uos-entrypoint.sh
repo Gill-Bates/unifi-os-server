@@ -94,9 +94,10 @@ validate_system_ip() {
         exit 1
     fi
 
-    # Conservative allowlist for adoption targets. This blocks control chars
-    # and shell-breaking input, but is not a full RFC-compliant host/IP parser.
-    if ! printf '%s' "$system_ip" | grep -Eq '^([A-Za-z0-9.-]+|[0-9a-fA-F:]+)$'; then
+    # Conservative allowlist for adoption targets. This blocks control chars,
+    # shell-breaking input, and leading-dash hostnames, but is not a full
+    # RFC-compliant host/IP parser.
+    if ! printf '%s' "$system_ip" | grep -Eq '^([A-Za-z0-9][A-Za-z0-9.-]*|[0-9a-fA-F:]+)$'; then
         log_error "Invalid UOS_SYSTEM_IP: $system_ip"
         exit 1
     fi
@@ -129,7 +130,7 @@ log_section "Configuration"
 
 # -----------------------------------------------------------------------------
 # Persist UOS_UUID env var
-# UniFi OS expects a UUID with version nibble '5' at position 15 (0-indexed 14).
+# UniFi OS expects a UUID with version nibble '5' at index 14.
 # This is cosmetic - UniFi does not cryptographically validate UUIDv5, it just
 # checks the format. We generate a random UUID and set the version nibble to '5'.
 # -----------------------------------------------------------------------------
@@ -226,6 +227,26 @@ preseed_postgres() {
     local pg_bin="/usr/lib/postgresql/14/bin"
     local pg_log="/var/log/postgresql/preseed.log"
     local pg_run="/var/run/postgresql"
+
+    stop_preseed_postgres() {
+        if [ ! -f "$pg_data/postmaster.pid" ]; then
+            return 0
+        fi
+
+        if ! runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast -w -t 30 >> "$pg_log" 2>&1; then
+            if [ -f "$pg_data/postmaster.pid" ]; then
+                log_error "PostgreSQL temporary stop failed (see $pg_log)"
+                return 1
+            fi
+        fi
+
+        if [ -f "$pg_data/postmaster.pid" ]; then
+            log_error "PostgreSQL postmaster.pid still exists after stop (see $pg_log)"
+            return 1
+        fi
+
+        return 0
+    }
     
     # This function is called from an if-statement below, which suppresses bash
     # errexit for the function body. Keep setup steps explicitly checked so an
@@ -282,7 +303,7 @@ preseed_postgres() {
     
     if [ $retries -eq 0 ]; then
         log_warn "PostgreSQL not accepting connections, will retry on next boot"
-        runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast >> "$pg_log" 2>&1 || true
+        stop_preseed_postgres || return 1
         return 1
     fi
     log_success "PostgreSQL running"
@@ -367,8 +388,10 @@ preseed_postgres() {
         fi
     done
     
-    # Stop PostgreSQL - systemd will start it properly
-    runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast >> "$pg_log" 2>&1 || true
+    # Stop PostgreSQL before systemd starts its managed instance.
+    if ! stop_preseed_postgres; then
+        return 1
+    fi
     
     local elapsed=$((SECONDS - start_time))
     
@@ -474,6 +497,8 @@ mkdir -p /etc/systemd/journald.conf.d
 } > /etc/systemd/journald.conf.d/docker.conf
 
 # Forward journal output to Docker logs only when explicitly requested.
+# This debug helper is best-effort; if journald restarts, the follower may need
+# the container to be restarted before Docker logs follow the journal again.
 #
 # Why not TTYPath=/dev/stdout in journald.conf?
 # When systemd starts journald as a service, it sets up journald's stdio

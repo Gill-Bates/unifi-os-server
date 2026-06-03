@@ -454,6 +454,65 @@ jobs:
           VERSION="$AMD_VERSION"
           REQUESTED_VERSION="${{ github.event.inputs.version }}"
           PROMOTE_LATEST_INPUT="${{ github.event.inputs.promote_latest }}"
+          REGISTRY_TOKEN="$(
+            curl -fsSL \
+              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAME}:pull" \
+              | jq -r '.token // empty'
+          )"
+          ACCEPT_HEADER='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
+
+          if [[ -z "${REGISTRY_TOKEN}" ]]; then
+            echo "Failed to obtain Docker registry pull token" >&2
+            exit 1
+          fi
+
+          version_ge() {
+            local candidate="$1"
+            local baseline="$2"
+
+            [[ "$(printf '%s\n%s\n' "$baseline" "$candidate" | sort -V | tail -n 1)" == "$candidate" ]]
+          }
+
+          fetch_manifest() {
+            local ref="$1"
+
+            curl -fsSL \
+              -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+              -H "Accept: ${ACCEPT_HEADER}" \
+              "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${ref}"
+          }
+
+          fetch_current_latest_version() {
+            local manifest child_digest child_manifest config_digest config version
+
+            if ! manifest="$(fetch_manifest "latest" 2>/dev/null)"; then
+              return 2
+            fi
+
+            child_digest="$(jq -r '.manifests[]? | select(.platform.architecture == "amd64") | .digest' <<< "$manifest" | head -n 1)"
+            if [[ -z "$child_digest" ]]; then
+              child_digest="$(jq -r '.manifests[0]?.digest // empty' <<< "$manifest")"
+            fi
+
+            if [[ -n "$child_digest" ]]; then
+              child_manifest="$(fetch_manifest "$child_digest")"
+            else
+              child_manifest="$manifest"
+            fi
+
+            config_digest="$(jq -r '.config.digest // empty' <<< "$child_manifest")"
+            [[ -n "$config_digest" ]] || return 1
+
+            config="$(
+              curl -fsSL \
+                -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+                "https://registry-1.docker.io/v2/${IMAGE_NAME}/blobs/${config_digest}"
+            )"
+
+            version="$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' <<< "$config")"
+            [[ -n "$version" ]] || return 1
+            printf '%s\n' "$version"
+          }
 
           if [[ -z "$AMD_VERSION" ]]; then
             echo "Missing amd64 version output"
@@ -498,6 +557,24 @@ jobs:
               exit 1
               ;;
           esac
+
+          if [[ "$PROMOTE_LATEST" == "true" ]]; then
+            if CURRENT_LATEST_VERSION="$(fetch_current_latest_version)"; then
+              echo "Current latest version: ${CURRENT_LATEST_VERSION}"
+              if ! version_ge "$VERSION" "$CURRENT_LATEST_VERSION"; then
+                echo "Refusing to move latest backward: built ${VERSION}, current latest ${CURRENT_LATEST_VERSION}" >&2
+                PROMOTE_LATEST=false
+              fi
+            else
+              LATEST_STATUS=$?
+              if [[ "$LATEST_STATUS" == "2" ]]; then
+                echo "No current latest manifest found; promotion is allowed."
+              else
+                echo "Current latest version could not be resolved; refusing latest promotion." >&2
+                exit 1
+              fi
+            fi
+          fi
           
           echo "Creating manifest with: ${IMAGES[*]}"
           echo "Promote latest: ${PROMOTE_LATEST}"
