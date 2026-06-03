@@ -102,6 +102,19 @@ validate_system_ip() {
     fi
 }
 
+validate_bool_env() {
+    local name="$1" value="$2"
+
+    case "$value" in
+        true|false)
+            ;;
+        *)
+            log_error "$name must be true or false"
+            exit 1
+            ;;
+    esac
+}
+
 # -----------------------------------------------------------------------------
 # Validate required environment variables (fail-fast)
 # -----------------------------------------------------------------------------
@@ -109,6 +122,8 @@ if [ -z "${UOS_SERVER_VERSION:-}" ]; then
     log_error "UOS_SERVER_VERSION is not set"
     exit 1
 fi
+UOS_SHOW_JOURNAL="${UOS_SHOW_JOURNAL:-false}"
+validate_bool_env "UOS_SHOW_JOURNAL" "$UOS_SHOW_JOURNAL"
 
 log_section "Configuration"
 
@@ -458,7 +473,7 @@ mkdir -p /etc/systemd/journald.conf.d
     echo "Storage=volatile"
 } > /etc/systemd/journald.conf.d/docker.conf
 
-# Forward journal output to Docker logs.
+# Forward journal output to Docker logs only when explicitly requested.
 #
 # Why not TTYPath=/dev/stdout in journald.conf?
 # When systemd starts journald as a service, it sets up journald's stdio
@@ -474,7 +489,7 @@ mkdir -p /etc/systemd/journald.conf.d
 # A /run lock makes this idempotent if the entrypoint is ever re-entered in the
 # same container lifecycle.
 JOURNAL_FORWARDER_LOCK="/run/uos-journal-forwarder.lock"
-if [ ! -e "$JOURNAL_FORWARDER_LOCK" ]; then
+if [ "$UOS_SHOW_JOURNAL" = "true" ] && [ ! -e "$JOURNAL_FORWARDER_LOCK" ]; then
     : > "$JOURNAL_FORWARDER_LOCK"
     (
         # Wait for journald's socket — it becomes available a few seconds

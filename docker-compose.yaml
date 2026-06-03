@@ -28,6 +28,8 @@ services:
       # Set these in `.env` or your shell before `docker compose up`.
       # Required for remote adoption: a reachable hostname or IP.
       UOS_SYSTEM_IP: ${UOS_SYSTEM_IP:-}
+      # Set to `true` to forward the full systemd journal to Docker logs.
+      UOS_SHOW_JOURNAL: ${UOS_SHOW_JOURNAL:-false}
       # Optional: set to `synology` if running on Synology NAS.
       HARDWARE_PLATFORM: ${HARDWARE_PLATFORM:-}
     volumes:

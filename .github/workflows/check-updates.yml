@@ -278,6 +278,7 @@ jobs:
                 version: process.env.LATEST_VERSION,
                 url_x64: process.env.URL_X64,
                 url_arm64: process.env.URL_ARM64,
+                promote_latest: 'true',
                 enforce_trivy_gate: 'false'  // Keep current non-blocking default for upstream CVEs
               },
               headers: {

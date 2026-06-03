@@ -41,9 +41,22 @@ on:
         options:
           - 'true'
           - 'false'
+      promote_latest:
+        description: 'Update Docker latest tag and mark release latest'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - 'auto'
+          - 'true'
+          - 'false'
 env:
   REGISTRY: docker.io
   IMAGE_NAME: giiibates/unifi-os-server
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
 
 # Prevent duplicate builds - queue new runs, don't cancel in-progress builds
 concurrency:
@@ -393,6 +406,9 @@ jobs:
     needs: [build-amd64, build-arm64]
     if: always() && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' && github.event.inputs.push != 'false'
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
+      promote_latest: ${{ steps.manifest.outputs.promote_latest }}
     permissions:
       contents: read
 
@@ -431,10 +447,13 @@ jobs:
           echo "token=${TOKEN}" >> "$GITHUB_OUTPUT"
 
       - name: Create and push manifest
+        id: manifest
         run: |
           AMD_VERSION="${{ needs.build-amd64.outputs.version }}"
           ARM_VERSION="${{ needs.build-arm64.outputs.version }}"
           VERSION="$AMD_VERSION"
+          REQUESTED_VERSION="${{ github.event.inputs.version }}"
+          PROMOTE_LATEST_INPUT="${{ github.event.inputs.promote_latest }}"
 
           if [[ -z "$AMD_VERSION" ]]; then
             echo "Missing amd64 version output"
@@ -459,28 +478,60 @@ jobs:
             echo "No images available for manifest"
             exit 1
           fi
+
+          case "${PROMOTE_LATEST_INPUT:-auto}" in
+            true)
+              PROMOTE_LATEST=true
+              ;;
+            false)
+              PROMOTE_LATEST=false
+              ;;
+            auto|"")
+              if [[ -z "$REQUESTED_VERSION" ]]; then
+                PROMOTE_LATEST=true
+              else
+                PROMOTE_LATEST=false
+              fi
+              ;;
+            *)
+              echo "Invalid promote_latest input: ${PROMOTE_LATEST_INPUT}" >&2
+              exit 1
+              ;;
+          esac
           
           echo "Creating manifest with: ${IMAGES[*]}"
+          echo "Promote latest: ${PROMOTE_LATEST}"
 
           # Keep the currently published stable tags in place until the new
           # manifest has been pushed successfully. Replacing a tag is safe;
           # deleting it first creates avoidable downtime if the push fails.
           docker manifest rm "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1 || true
-          docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
+          if [[ "$PROMOTE_LATEST" == "true" ]]; then
+            docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
+          fi
 
           # Create version manifest
           docker manifest create "${IMAGE_NAME}:${VERSION}" "${IMAGES[@]}" --amend
           docker manifest push "${IMAGE_NAME}:${VERSION}" || { echo "Versioned manifest push failed" >&2; exit 1; }
           
-          # Create latest manifest
-          docker manifest create "${IMAGE_NAME}:latest" "${IMAGES[@]}" --amend
-          docker manifest push "${IMAGE_NAME}:latest" || { echo "latest manifest push failed" >&2; exit 1; }
+          if [[ "$PROMOTE_LATEST" == "true" ]]; then
+            docker manifest create "${IMAGE_NAME}:latest" "${IMAGES[@]}" --amend
+            docker manifest push "${IMAGE_NAME}:latest" || { echo "latest manifest push failed" >&2; exit 1; }
+          else
+            echo "Skipped latest manifest promotion"
+          fi
           
           echo "Pushed manifests:"
           echo "  ${IMAGE_NAME}:${VERSION}"
-          echo "  ${IMAGE_NAME}:latest"
+          if [[ "$PROMOTE_LATEST" == "true" ]]; then
+            echo "  ${IMAGE_NAME}:latest"
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "promote_latest=${PROMOTE_LATEST}" >> "$GITHUB_OUTPUT"
 
       - name: Delete arch-specific tags from Docker Hub
+        if: always() && steps.hubtoken.outputs.token != ''
         env:
           HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
         run: |
@@ -502,6 +553,7 @@ jobs:
           done
 
       - name: Prune stale untagged Docker Hub image objects
+        if: steps.hubtoken.outputs.token != ''
         env:
           HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
         run: |
@@ -539,15 +591,23 @@ jobs:
 
           collect_protected_digests() {
             local tag="$1"
+            local optional="${2:-false}"
             local manifest_file="${tmpdir}/manifest-${tag}.json"
             local headers
 
-            headers="$(
+            if ! headers="$(
               curl -fsSIL \
-                -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
-                -H "Accept: ${ACCEPT_HEADER}" \
-                "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${tag}"
-            )"
+                  -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+                  -H "Accept: ${ACCEPT_HEADER}" \
+                  "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${tag}"
+            )"; then
+              if [[ "$optional" == "true" ]]; then
+                echo "No published manifest found for ${tag}; skipping digest protection."
+                return 0
+              fi
+              echo "Published manifest ${tag} is missing; cannot protect digests before pruning." >&2
+              exit 1
+            fi
 
             echo "${headers}" \
               | awk 'BEGIN{IGNORECASE=1} /^docker-content-digest:/ {gsub(/\r/, ""); print $2}' \
@@ -563,7 +623,7 @@ jobs:
           }
 
           collect_protected_digests "${VERSION}"
-          collect_protected_digests "latest"
+          collect_protected_digests "latest" true
 
           sort -u "${protected}" -o "${protected}"
           echo "Protected digests:"
@@ -581,12 +641,12 @@ jobs:
             PAGE="$(echo "${PAGE_WITH_STATUS}" | sed '$d')"
 
             if [[ "${HTTP_STATUS}" == "404" ]]; then
-              echo "Inactive images API returned 404 — feature unavailable or no inactive image objects."
-              break
+              echo "Inactive images API returned 404; cannot verify stale image cleanup." >&2
+              exit 1
             fi
             if [[ "${HTTP_STATUS}" != "200" ]]; then
-              echo "WARNING: Inactive images API returned HTTP ${HTTP_STATUS}; skipping prune." >&2
-              break
+              echo "Inactive images API returned HTTP ${HTTP_STATUS}; cannot verify stale image cleanup." >&2
+              exit 1
             fi
 
             COUNT="$(echo "${PAGE}" | jq -r '.count // 0')"
@@ -611,7 +671,8 @@ jobs:
               elif [[ "${STATUS}" == "404" ]]; then
                 echo "Already gone: ${DIGEST}"
               else
-                echo "WARNING: unexpected HTTP ${STATUS} pruning ${DIGEST}" >&2
+                echo "Unexpected HTTP ${STATUS} pruning ${DIGEST}" >&2
+                exit 1
               fi
             done < <(echo "${PAGE}" | jq -r '.results[].digest // empty')
 
@@ -627,13 +688,13 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-      actions: read
 
     steps:
       - name: Create or update GitHub Release
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           VERSION: ${{ needs.build-amd64.outputs.version }}
+          PROMOTE_LATEST: ${{ needs.create-manifest.outputs.promote_latest }}
           TRIVY_AMD64: ${{ needs.build-amd64.outputs.trivy_summary }}
           TRIVY_ARM64: ${{ needs.build-arm64.outputs.trivy_summary }}
         with:
@@ -646,6 +707,7 @@ jobs:
             const version = process.env.VERSION;
             const tagName = 'v' + version;
             const sha = context.sha;
+            const promoteLatest = process.env.PROMOTE_LATEST === 'true';
             const trivyAmd64 = process.env.TRIVY_AMD64 || 'Scan not available';
             const trivyArm64 = process.env.TRIVY_ARM64 || 'Scan not available';
 
@@ -670,37 +732,6 @@ jobs:
                 );
               }
               throw error;
-            }
-
-            async function resolveTrivyArtifactLinks() {
-              const findings = {
-                amd64: `${runUrl}#artifacts`,
-                arm64: `${runUrl}#artifacts`
-              };
-
-              try {
-                const { data } = await github.rest.actions.listWorkflowRunArtifacts({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  run_id: runId,
-                  per_page: 100
-                });
-
-                const artifacts = data && Array.isArray(data.artifacts) ? data.artifacts : [];
-                const amd = artifacts.find((a) => a && a.name === 'trivy-findings-amd64');
-                const arm = artifacts.find((a) => a && a.name === 'trivy-findings-arm64');
-
-                if (amd) {
-                  findings.amd64 = `${runUrl}#artifacts`;
-                }
-                if (arm) {
-                  findings.arm64 = `${runUrl}#artifacts`;
-                }
-              } catch (e) {
-                console.warn(`Failed to resolve Trivy artifact links: ${e.message}`);
-              }
-
-              return findings;
             }
 
             function stripHtml(html = '') {
@@ -890,7 +921,16 @@ jobs:
               ];
             }
 
-            const findingsLinks = await resolveTrivyArtifactLinks();
+            const findingsLinks = {
+              amd64: `${runUrl}#artifacts`,
+              arm64: `${runUrl}#artifacts`
+            };
+            const availableTags = [
+              '- `' + imageName + ':' + version + '` (multi-arch: linux/amd64, linux/arm64)'
+            ];
+            if (promoteLatest) {
+              availableTags.push('- `' + imageName + ':latest`');
+            }
 
             const body = [
               '## UniFi OS Server ' + version,
@@ -898,8 +938,7 @@ jobs:
               '**Docker Image:** `docker pull ' + imageName + ':' + version + '`',
               '',
               '### Available Tags',
-              '- `' + imageName + ':' + version + '` (multi-arch: linux/amd64, linux/arm64)',
-              '- `' + imageName + ':latest`',
+              ...availableTags,
               '',
               '> Architecture-specific tags (`-amd64`, `-arm64`) are removed from Docker Hub after the multi-arch manifest is published.',
               '',
@@ -917,7 +956,7 @@ jobs:
               '**Source:** [Ubiquiti Downloads](https://ui.com/download/software/unifi-os-server)'
             ].join('\n');
 
-            // --- Idempotenz: Tag zuerst auf aktuellen Commit setzen/verschieben ---
+            // --- Idempotency: move the release tag before upserting the release ---
             async function upsertTag() {
               const ref = `tags/${tagName}`;
               let existingRef;
@@ -953,28 +992,21 @@ jobs:
               // This will fail with 403 if tag protection rules/rulesets block it.
               console.log(`Tag ${tagName} at ${existingRef.object.sha}, moving to ${sha}...`);
               try {
-                // Attempt 1: delete + create (works with tag protection that allows
-                // deletion but blocks force-push)
-                await github.rest.git.deleteRef({
+                await github.rest.git.updateRef({
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  ref: `tags/${tagName}`
+                  ref: `tags/${tagName}`,
+                  sha,
+                  force: true
                 });
-                await github.rest.git.createRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: `refs/tags/${tagName}`,
-                  sha
-                });
-                console.log(`Moved tag ${tagName} -> ${sha} (delete+create)`);
+                console.log(`Moved tag ${tagName} -> ${sha}`);
               } catch (e) {
                 if (e.status === 403 || e.status === 422) {
-                  // Tag protection blocks the move — continue with release update only.
-                  // The release body/name/notes will still be updated idempotently;
-                  // only the tag's commit pointer stays on the previous commit.
-                  console.warn(`Cannot move tag ${tagName}: ${e.message}`);
-                  console.warn('Tag is likely protected by a ruleset. Release will be updated without moving the tag.');
-                  console.warn('To fix: remove the tag protection rule for v* tags, or accept that re-runs keep the original tag commit.');
+                  throw new Error(
+                    `Cannot move tag ${tagName}: ${e.message}. ` +
+                    'Idempotent replacement requires the release tag to point at the current workflow commit. ' +
+                    'Remove the tag protection rule for v* tags or use RELEASE_TOKEN with permission to update release tags.'
+                  );
                 } else {
                   throw e;
                 }
@@ -1040,7 +1072,7 @@ jobs:
                   body: body,
                   draft: false,
                   prerelease: false,
-                  make_latest: 'true'
+                  make_latest: promoteLatest ? 'true' : 'false'
                 });
                 console.log(`Updated release ${existingRelease.id} for ${tagName}`);
                 await deleteDuplicateReleases(existingRelease, matchingReleases);
@@ -1057,7 +1089,7 @@ jobs:
                   body: body,
                   draft: false,
                   prerelease: false,
-                  make_latest: 'true'
+                  make_latest: promoteLatest ? 'true' : 'false'
                 });
                 console.log(`Created release ${createdRelease.id} for ${tagName}`);
               } catch (e) {
@@ -1080,7 +1112,7 @@ jobs:
                   body: body,
                   draft: false,
                   prerelease: false,
-                  make_latest: 'true'
+                  make_latest: promoteLatest ? 'true' : 'false'
                 });
                 console.log(`Updated release ${retryRelease.id} for ${tagName} after 422 retry`);
                 await deleteDuplicateReleases(retryRelease, retryMatches);

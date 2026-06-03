@@ -82,6 +82,7 @@ services:
 
     environment:
       UOS_SYSTEM_IP: ${UOS_SYSTEM_IP:-}
+      UOS_SHOW_JOURNAL: ${UOS_SHOW_JOURNAL:-false}
       HARDWARE_PLATFORM: ${HARDWARE_PLATFORM:-}
 
     ports:
@@ -195,7 +196,7 @@ Persistent data under `./data` remains intact.
 ## Troubleshooting
 
 ```bash
-# Live container log (systemd journal forwarded to Docker log driver)
+# Live container log (startup banner by default)
 docker logs -f unifi-os-server
 
 # Service startup status
@@ -220,7 +221,7 @@ docker exec -it unifi-os-server journalctl -u postgresql -f
 docker exec -it unifi-os-server journalctl -u rabbitmq-server -f
 ```
 
-> The systemd journal is forwarded directly to Docker's log driver. `docker logs -f` shows all service output without needing a TTY.
+> By default, `docker logs -f` shows only the startup banner and entrypoint summary. Set `UOS_SHOW_JOURNAL=true` to forward the full systemd journal to Docker logs. Otherwise, use `docker exec ... journalctl` for verbose service logs.
 
 ## Security Notice
 

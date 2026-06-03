@@ -23,6 +23,7 @@ LABEL org.opencontainers.image.title="unifi-os-server" \
 
 # Environment variables for configuration
 ENV UOS_SERVER_VERSION="${APP_VERSION}"
+ENV UOS_SHOW_JOURNAL="false"
 
 # Copy our entrypoint that configures the container before starting systemd
 COPY --chmod=755 docker/uos-entrypoint.sh /usr/local/bin/uos-entrypoint.sh
