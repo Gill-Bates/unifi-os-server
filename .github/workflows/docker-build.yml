@@ -718,8 +718,8 @@ jobs:
             PAGE="$(echo "${PAGE_WITH_STATUS}" | sed '$d')"
 
             if [[ "${HTTP_STATUS}" == "404" ]]; then
-              echo "Inactive images API returned 404; cannot verify stale image cleanup." >&2
-              exit 1
+              echo "Inactive images API returned 404; feature unavailable or no inactive image objects. Skipping prune."
+              break
             fi
             if [[ "${HTTP_STATUS}" != "200" ]]; then
               echo "Inactive images API returned HTTP ${HTTP_STATUS}; cannot verify stale image cleanup." >&2
