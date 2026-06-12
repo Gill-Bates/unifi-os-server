@@ -52,7 +52,9 @@ docker-compose.yaml
 > This project packages the official UniFi OS Server software from Ubiquiti. Many findings originate from upstream vendor components and cannot be fixed directly in this repository.
 >
 > Security fixes must come from Ubiquiti upstream releases and can only be included here after a new upstream version is available.
-
+>
+> *Update Jun 10, 2026:
+> We have reviewed the information you provided and discussed the findings internally with our development team. The issue has been reported to the responsible teams, and fixes for the affected packages are planned for a future UniFi OS Server release.*
 ---
 
 ## Requirements
