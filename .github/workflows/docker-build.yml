@@ -101,11 +101,10 @@ jobs:
           VERSION: ${{ github.event.inputs.version }}
           UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
           UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
+          # INPUT_VERSION is passed via env (not inline ${{ }}) to prevent
+          # shell injection: ${{ }} is expanded before shell execution.
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          # Reproducible BUILD_DATE: bind to the commit, not wall-clock time.
-          # Identical source + installer -> identical image digest, so a rebuild
-          # of the same version overwrites the same digest instead of creating
-          # a new untagged orphan in the registry.
           BUILD_DATE="$(git -C "$GITHUB_WORKSPACE" log -1 --format=%cI)"
           export BUILD_DATE
           echo "Using reproducible BUILD_DATE=${BUILD_DATE}"
@@ -125,7 +124,9 @@ jobs:
             exit 1
           fi
 
-          EXPECTED_VERSION="${{ github.event.inputs.version }}"
+          # EXPECTED_VERSION comes from the workflow input via env: to avoid
+          # direct ${{ }} interpolation into the shell script (injection risk).
+          EXPECTED_VERSION="${INPUT_VERSION}"
           if [[ -n "$EXPECTED_VERSION" && "$VERSION" != "$EXPECTED_VERSION" ]]; then
             echo "Resolved image version ($VERSION) does not match requested version ($EXPECTED_VERSION)" >&2
             exit 1
@@ -200,29 +201,43 @@ jobs:
           VERSION="${{ steps.build.outputs.version }}"
           IMAGE="${IMAGE_NAME}:${VERSION}-amd64"
           echo "Running filesystem smoke test for $IMAGE..."
-          
-          # Run as one-shot with entrypoint override - avoids systemd/cgroup issues
-          # This is a pure filesystem validation, not a runtime test
+
+          # Run as one-shot with entrypoint override — pure filesystem validation.
+          # Critical checks use explicit exit 1 so this step actually fails when
+          # the image is broken (instead of printing MISSING and exiting 0).
           docker run --rm --entrypoint /bin/sh "$IMAGE" -c '
+            set -e
+
             echo "=== Basic structure ==="
-            test -x /sbin/init && echo "/sbin/init: OK" || echo "/sbin/init: MISSING"
-            
+            if ! test -x /sbin/init; then
+              echo "/sbin/init: MISSING or not executable" >&2
+              exit 1
+            fi
+            echo "/sbin/init: OK"
+
+            echo "=== Systemd service units ==="
+            UNIT_COUNT=$(find /lib/systemd/system /etc/systemd/system -name "*.service" 2>/dev/null \
+              | grep -ic unifi || true)
+            if [ "$UNIT_COUNT" -eq 0 ]; then
+              echo "No unifi*.service units found" >&2
+              exit 1
+            fi
+            echo "Found $UNIT_COUNT unifi service unit(s): OK"
+
             echo "=== Java ==="
-            which java 2>/dev/null || find /usr -name "java" -type f 2>/dev/null | head -1 || echo "Java not found"
-            
+            which java 2>/dev/null \
+              || find /usr -name "java" -type f 2>/dev/null | head -1 \
+              || echo "Java not found (informational)"
+
             echo "=== UniFi directories ==="
             ls -d /usr/share/*unifi* 2>/dev/null || echo "No /usr/share/*unifi*"
             ls -d /opt/*unifi* 2>/dev/null || echo "No /opt/*unifi*"
             ls -d /var/lib/*unifi* 2>/dev/null || echo "No /var/lib/*unifi*"
-            
+
             echo "=== JAR files (first 5) ==="
-            find /usr /opt /var/lib -name "*.jar" -type f 2>/dev/null | head -5 || echo "No JAR files"
-            
-            echo "=== Systemd services ==="
-            ls /lib/systemd/system/*.service 2>/dev/null | grep -i unifi | head -5 || \
-            ls /etc/systemd/system/*.service 2>/dev/null | head -5 || \
-            echo "No services found"
-            
+            find /usr /opt /var/lib -name "*.jar" -type f 2>/dev/null | head -5 \
+              || echo "No JAR files"
+
             echo "Smoke test passed!"
           '
 
@@ -271,6 +286,7 @@ jobs:
           VERSION: ${{ github.event.inputs.version }}
           UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
           UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           # Reproducible BUILD_DATE: bind to the commit, not wall-clock time.
           # Identical source + installer -> identical image digest, so a rebuild
@@ -295,13 +311,14 @@ jobs:
             exit 1
           fi
 
-          EXPECTED_VERSION="${{ github.event.inputs.version }}"
+          EXPECTED_VERSION="${INPUT_VERSION}"
           if [[ -n "$EXPECTED_VERSION" && "$VERSION" != "$EXPECTED_VERSION" ]]; then
             echo "Resolved image version ($VERSION) does not match requested version ($EXPECTED_VERSION)" >&2
             exit 1
           fi
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Built version: ${VERSION}"
 
       - name: Upload failure artifacts (arm64)
         if: failure()
@@ -369,31 +386,43 @@ jobs:
           VERSION="${{ steps.build.outputs.version }}"
           IMAGE="${IMAGE_NAME}:${VERSION}-arm64"
           echo "Running filesystem smoke test for $IMAGE..."
-          
-          # Run as one-shot with entrypoint override - avoids systemd/cgroup issues
-          # This is a pure filesystem validation, not a runtime test
+
           docker run --rm --entrypoint /bin/sh "$IMAGE" -c '
+            set -e
+
             echo "=== Basic structure ==="
-            test -x /sbin/init && echo "/sbin/init: OK" || echo "/sbin/init: MISSING"
-            
+            if ! test -x /sbin/init; then
+              echo "/sbin/init: MISSING or not executable" >&2
+              exit 1
+            fi
+            echo "/sbin/init: OK"
+
+            echo "=== Systemd service units ==="
+            UNIT_COUNT=$(find /lib/systemd/system /etc/systemd/system -name "*.service" 2>/dev/null \
+              | grep -ic unifi || true)
+            if [ "$UNIT_COUNT" -eq 0 ]; then
+              echo "No unifi*.service units found" >&2
+              exit 1
+            fi
+            echo "Found $UNIT_COUNT unifi service unit(s): OK"
+
             echo "=== Java ==="
-            which java 2>/dev/null || find /usr -name "java" -type f 2>/dev/null | head -1 || echo "Java not found"
-            
+            which java 2>/dev/null \
+              || find /usr -name "java" -type f 2>/dev/null | head -1 \
+              || echo "Java not found (informational)"
+
             echo "=== UniFi directories ==="
             ls -d /usr/share/*unifi* 2>/dev/null || echo "No /usr/share/*unifi*"
             ls -d /opt/*unifi* 2>/dev/null || echo "No /opt/*unifi*"
             ls -d /var/lib/*unifi* 2>/dev/null || echo "No /var/lib/*unifi*"
-            
+
             echo "=== JAR files (first 5) ==="
-            find /usr /opt /var/lib -name "*.jar" -type f 2>/dev/null | head -5 || echo "No JAR files"
-            
-            echo "=== Systemd services ==="
-            ls /lib/systemd/system/*.service 2>/dev/null | grep -i unifi | head -5 || \
-            ls /etc/systemd/system/*.service 2>/dev/null | head -5 || \
-            echo "No services found"
-            
+            find /usr /opt /var/lib -name "*.jar" -type f 2>/dev/null | head -5 \
+              || echo "No JAR files"
+
             echo "Smoke test passed!"
           '
+          echo "Built version: ${VERSION}"
 
       - name: Push arm64 image
         if: github.event.inputs.push != 'false'
@@ -448,12 +477,17 @@ jobs:
 
       - name: Create and push manifest
         id: manifest
+        env:
+          # Pass dispatch inputs via env to avoid direct ${{ }} interpolation
+          # in the shell script — same pattern as the build steps.
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_PROMOTE_LATEST: ${{ github.event.inputs.promote_latest }}
         run: |
           AMD_VERSION="${{ needs.build-amd64.outputs.version }}"
           ARM_VERSION="${{ needs.build-arm64.outputs.version }}"
           VERSION="$AMD_VERSION"
-          REQUESTED_VERSION="${{ github.event.inputs.version }}"
-          PROMOTE_LATEST_INPUT="${{ github.event.inputs.promote_latest }}"
+          REQUESTED_VERSION="${INPUT_VERSION}"
+          PROMOTE_LATEST_INPUT="${INPUT_PROMOTE_LATEST}"
           REGISTRY_TOKEN="$(
             curl -fsSL \
               "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAME}:pull" \
@@ -524,7 +558,10 @@ jobs:
             exit 1
           fi
           
-          # Check which images are available
+          # Verify both arch images are available — the needs-guard guarantees
+          # both build jobs succeeded, but a Hub-side race or a concurrent delete
+          # could still leave one tag missing. Publishing a "multi-arch" manifest
+          # with a single platform would silently misrepresent the release.
           IMAGES=()
           if docker manifest inspect "${IMAGE_NAME}:${VERSION}-amd64" > /dev/null 2>&1; then
             IMAGES+=("${IMAGE_NAME}:${VERSION}-amd64")
@@ -532,9 +569,10 @@ jobs:
           if docker manifest inspect "${IMAGE_NAME}:${VERSION}-arm64" > /dev/null 2>&1; then
             IMAGES+=("${IMAGE_NAME}:${VERSION}-arm64")
           fi
-          
-          if (( ${#IMAGES[@]} == 0 )); then
-            echo "No images available for manifest"
+
+          if (( ${#IMAGES[@]} != 2 )); then
+            echo "Expected 2 arch images on Hub, found ${#IMAGES[@]}: ${IMAGES[*]:-none}" >&2
+            echo "This may indicate a Hub inconsistency or a concurrent tag deletion." >&2
             exit 1
           fi
 
@@ -608,7 +646,10 @@ jobs:
           echo "promote_latest=${PROMOTE_LATEST}" >> "$GITHUB_OUTPUT"
 
       - name: Delete arch-specific tags from Docker Hub
-        if: always() && steps.hubtoken.outputs.token != ''
+        # Only run when the manifest step succeeded — running on failure would
+        # delete the arch-specific tags even though no multi-arch manifest was
+        # published, leaving the version effectively unreachable on Hub.
+        if: steps.manifest.conclusion == 'success' && steps.hubtoken.outputs.token != ''
         env:
           HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
         run: |
@@ -630,7 +671,12 @@ jobs:
           done
 
       - name: Prune stale untagged Docker Hub image objects
-        if: steps.hubtoken.outputs.token != ''
+        # continue-on-error: the manifest and arch images are already live at
+        # this point. A prune failure (rate limit, Hub API hiccup) must not
+        # block the downstream create-release job — the next build run will
+        # clean up whatever this run missed.
+        if: steps.manifest.conclusion == 'success' && steps.hubtoken.outputs.token != ''
+        continue-on-error: true
         env:
           HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
         run: |
@@ -819,11 +865,14 @@ jobs:
                 .replace(/<li[^>]*>/gi, '- ')
                 .replace(/<[^>]+>/g, '')
                 .replace(/&nbsp;/gi, ' ')
-                .replace(/&amp;/gi, '&')
+                // Decode named/numeric entities with &amp; last so that a
+                // double-encoded sequence like &amp;lt; → &lt; → < is not
+                // produced. Decoding &amp; first would cause exactly that.
                 .replace(/&lt;/gi, '<')
                 .replace(/&gt;/gi, '>')
                 .replace(/&#39;/gi, "'")
                 .replace(/&quot;/gi, '"')
+                .replace(/&amp;/gi, '&')
                 .replace(/[ \t]+\n/g, '\n')
                 .replace(/\n{3,}/g, '\n\n')
                 .trim();

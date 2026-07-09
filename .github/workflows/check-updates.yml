@@ -223,27 +223,39 @@ jobs:
           fi
 
       - name: Create summary
+        env:
+          API_AVAILABLE: ${{ steps.check.outputs.api_available }}
+          CURRENT_VERSION: ${{ steps.check.outputs.current_version }}
+          LATEST_VERSION: ${{ steps.check.outputs.latest_version }}
+          NEW_VERSION_AVAILABLE: ${{ steps.check.outputs.new_version_available }}
+          # URLs come from the Ubiquiti API. Pass via env (not inline ${{ }})
+          # to prevent shell injection: GitHub expands ${{ }} textually before
+          # the shell runs, so a crafted URL containing $(...) or backticks
+          # would execute in the runner. The URL validation upstream only
+          # enforces ^https://[^[:space:]]+$, which allows shell-special chars.
+          URL_X64: ${{ steps.check.outputs.url_x64 }}
+          URL_ARM64: ${{ steps.check.outputs.url_arm64 }}
         run: |
           {
             echo "## UniFi OS Server Version Check"
             echo ""
             echo "| Property | Value |"
             echo "|----------|-------|"
-            echo "| API Metadata Available | ${{ steps.check.outputs.api_available }} |"
-            echo "| Current Version | ${{ steps.check.outputs.current_version }} |"
-            echo "| Latest Version | ${{ steps.check.outputs.latest_version }} |"
-            echo "| Update Available | ${{ steps.check.outputs.new_version_available }} |"
+            echo "| API Metadata Available | ${API_AVAILABLE} |"
+            echo "| Current Version | ${CURRENT_VERSION} |"
+            echo "| Latest Version | ${LATEST_VERSION} |"
+            echo "| Update Available | ${NEW_VERSION_AVAILABLE} |"
 
-            if [[ "${{ steps.check.outputs.api_available }}" != "true" ]]; then
+            if [[ "${API_AVAILABLE}" != "true" ]]; then
               echo ""
               echo "API request to Ubiquiti timed out or failed. This run was skipped safely."
             fi
 
-            if [[ "${{ steps.check.outputs.new_version_available }}" == "true" ]]; then
+            if [[ "${NEW_VERSION_AVAILABLE}" == "true" ]]; then
               echo ""
               echo "### Download URLs"
-              echo "- x64: \`${{ steps.check.outputs.url_x64 }}\`"
-              echo "- arm64: \`${{ steps.check.outputs.url_arm64 }}\`"
+              echo "- x64: \`${URL_X64}\`"
+              echo "- arm64: \`${URL_ARM64}\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
