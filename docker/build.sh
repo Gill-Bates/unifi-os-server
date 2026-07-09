@@ -497,7 +497,7 @@ fetch_registry_json() {
     local response status body
 
     response="$(
-        curl -sS -w '\n%{http_code}' \
+        curl -sS -L -w '\n%{http_code}' \
             --connect-timeout 10 \
             --max-time 20 \
             -H "Authorization: Bearer ${token}" \
