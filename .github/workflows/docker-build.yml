@@ -101,10 +101,10 @@ jobs:
           VERSION: ${{ github.event.inputs.version }}
           UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
           UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
-          # INPUT_VERSION is passed via env (not inline ${{ }}) to prevent
-          # shell injection: ${{ }} is expanded before shell execution.
           INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
+          # INPUT_VERSION is set in env above (not inline ${{ }}) to prevent
+          # shell injection: GitHub expands ${{ }} textually before shell runs.
           BUILD_DATE="$(git -C "$GITHUB_WORKSPACE" log -1 --format=%cI)"
           export BUILD_DATE
           echo "Using reproducible BUILD_DATE=${BUILD_DATE}"
