@@ -325,6 +325,12 @@ tar -tf "$OUTPUT_TAR" 2>/dev/null | grep -E '^(manifest\.json|repositories|[a-f0
 
 echo "$IMAGE_NAME" > "${OUTPUT_DIR}/image-tag.txt"
 
+# Write a sentinel file AFTER the tar is fully written and synced.
+# The build monitor polls for this file instead of parsing log output,
+# which is more reliable when the container logs more lines after completion.
+sync
+touch "${OUTPUT_DIR}/.extraction-done"
+
 log "Extraction complete!"
 log "Image exported to: $OUTPUT_TAR"
 log "Image tag: $IMAGE_NAME"

@@ -15,6 +15,23 @@
 # The installer runs in the outer container, imports the uosserver image into podman,
 # then tries to start the inner container. The inner container fails (no systemd in build),
 # but the image is extracted to /output/uosserver.tar.
+
+# P1: Source-guard must be the very first executed logic — before set -euo pipefail
+# and before any variable assignments — so that sourcing the script neither
+# activates strict-mode in the caller's shell nor leaks variables into it.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    printf '[build] This script must be executed, not sourced. Use ./build.sh or bash ./build.sh.\n' >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+# Require Bash >= 4.4: empty-array expansion under set -u (${arr[@]}) is safe
+# only from 4.4 onward. macOS ships Bash 3.2 — catch it here instead of dying
+# cryptically mid-build.
+if (( BASH_VERSINFO[0] < 4 || ( BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4 ) )); then
+    printf '[build] Bash >= 4.4 required (found %s). On macOS: brew install bash\n' "$BASH_VERSION" >&2
+    exit 1
+fi
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +53,15 @@ load_dotenv_defaults() {
 
         key="${BASH_REMATCH[1]}"
         value="${BASH_REMATCH[2]}"
+
+        # Strip inline comments (value # comment → value).
+        # Only strip when the comment marker is preceded by whitespace so that
+        # URLs with fragment-like '#' characters are preserved.
+        value="${value%%[[:space:]]#*}"
+
+        # Trim leading and trailing whitespace from the value.
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
 
         if [[ ${#value} -ge 2 ]]; then
             case "$value" in
@@ -97,9 +123,9 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
-    printf '[build] This script must be executed, not sourced. Use ./build.sh or bash ./build.sh.\n' >&2
-    return 1 2>/dev/null || exit 1
+# Disable colors when stderr is not a TTY or when NO_COLOR is set (per no-color.org).
+if [[ ! -t 2 || -n "${NO_COLOR:-}" ]]; then
+    RED='' GREEN='' YELLOW='' BLUE='' NC=''
 fi
 
 amd64_url=""
@@ -190,13 +216,14 @@ container_exists() {
     docker inspect "$container_name" >/dev/null 2>&1
 }
 
-# Print full container state for diagnostics
-print_container_state() {
+# Format container state as plain text to stdout.
+# Use this when the output must be captured or redirected to a file.
+format_container_state() {
     local container_name="$1"
     local prefix="${2:-}"
 
     if ! container_exists "$container_name"; then
-        diag "${prefix}Container '$container_name': does not exist"
+        printf '%sContainer '\''%s'\'': does not exist\n' "$prefix" "$container_name"
         return 0
     fi
 
@@ -208,13 +235,25 @@ print_container_state() {
     started=$(get_container_started_at "$container_name")
     finished=$(get_container_finished_at "$container_name")
 
-    diag "${prefix}Container '$container_name':"
-    diag "${prefix}  state:      $state"
-    diag "${prefix}  exit_code:  $exit_code"
-    diag "${prefix}  oom_killed: $oom_killed"
-    diag "${prefix}  started:    $started"
-    diag "${prefix}  finished:   $finished"
-    [[ -z "$error_msg" ]] || diag "${prefix}  error:      $error_msg"
+    printf '%sContainer '\''%s'\'':\n' "$prefix" "$container_name"
+    printf '%s  state:      %s\n' "$prefix" "$state"
+    printf '%s  exit_code:  %s\n' "$prefix" "$exit_code"
+    printf '%s  oom_killed: %s\n' "$prefix" "$oom_killed"
+    printf '%s  started:    %s\n' "$prefix" "$started"
+    printf '%s  finished:   %s\n' "$prefix" "$finished"
+    [[ -z "$error_msg" ]] || printf '%s  error:      %s\n' "$prefix" "$error_msg"
+}
+
+# Print full container state to stderr via diag() for live CI visibility.
+# To capture state into a file use format_container_state instead.
+print_container_state() {
+    local container_name="$1"
+    local prefix="${2:-}"
+    # format_container_state writes to stdout; redirect into diag one line at a time
+    # so that each line gets the standard [diag] timestamp prefix.
+    while IFS= read -r line; do
+        diag "$line"
+    done < <(format_container_state "$container_name" "$prefix")
 }
 
 #######################################
@@ -255,8 +294,8 @@ preserve_failure() {
         return
     fi
 
-    # Save container state
-    print_container_state "$container_name" "  " >> "${prefix}-reason.txt"
+    # Save container state (stdout → file via format_container_state)
+    format_container_state "$container_name" "  " >> "${prefix}-reason.txt"
 
     # Save full inspect
     diag "Saving docker inspect..."
@@ -441,6 +480,8 @@ fetch_docker_hub_token() {
 
     token="$(
         curl -fsSL \
+            --connect-timeout 10 \
+            --max-time 20 \
             "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
             | jq -r '.token // empty'
     )" || return 1
@@ -457,6 +498,8 @@ fetch_registry_json() {
 
     response="$(
         curl -sS -w '\n%{http_code}' \
+            --connect-timeout 10 \
+            --max-time 20 \
             -H "Authorization: Bearer ${token}" \
             -H "Accept: ${accept_header}" \
             "$url"
@@ -609,6 +652,14 @@ init_host_arch() {
     esac
 }
 
+# Check if a binfmt_misc entry is registered and enabled.
+# Defined at top level so it is not re-declared on every can_emulate_arch call.
+binfmt_enabled() {
+    local entry="$1"
+    [[ -f "$entry" ]] || return 1
+    grep -q '^enabled$' "$entry"
+}
+
 # Check if QEMU/binfmt is available for cross-architecture builds
 can_emulate_arch() {
     local target_arch="$1"
@@ -618,11 +669,6 @@ can_emulate_arch() {
     
     # Check binfmt_misc for the target architecture
     local binfmt_path="/proc/sys/fs/binfmt_misc"
-    binfmt_enabled() {
-        local entry="$1"
-        [[ -f "$entry" ]] || return 1
-        grep -q '^enabled$' "$entry"
-    }
 
     if [[ -d "$binfmt_path" ]]; then
         case "$target_arch" in
@@ -779,8 +825,7 @@ installer_url_for_arch() {
 
 build_extractor_image() {
     local arch="$1"
-    local installer_url="$2"
-    local __out="$3"
+    local __out="$2"
     local extractor_image_tag="uos-extractor:${VERSION}-${arch}"
 
     log "Phase 1: Building extractor image for linux/${arch}"
@@ -852,24 +897,26 @@ run_extraction() {
                     local current_size prev_size prev_size2
                     current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
                     
-                    # Wait longer for file to stop growing (handles repair/repack phase)
-                    sleep 3
+                    # Wait for file to stop growing (handles repair/repack phase).
+                    # Count the sleeps toward elapsed to avoid timeout drift.
+                    sleep 3; elapsed=$((elapsed + 3))
                     prev_size=$current_size
                     current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
                     
-                    # Double-check with another wait to ensure repair phase is complete
-                    sleep 3
+                    sleep 3; elapsed=$((elapsed + 3))
                     prev_size2=$current_size
                     current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
                     
                     if (( current_size == prev_size && current_size == prev_size2 && current_size > MIN_TAR_SIZE_MB * 1024 * 1024 )); then
-                        # Also verify the extraction script has finished
-                        if docker logs --tail 5 "$container_name" 2>&1 | grep -q "Extraction complete!"; then
+                        # Prefer a sentinel file written by the extraction script
+                        # over log-tail parsing: the sentinel is reliable even when
+                        # the container logs more than a few lines after completion.
+                        if [[ -f "${output_dir}/.extraction-done" ]]; then
                             log "Extraction artifact found while container running (size stable at $((current_size / 1024 / 1024))MB)"
                             success=true
                             break
                         else
-                            diag "Tar stable but extraction script not finished yet"
+                            diag "Tar stable but extraction sentinel not present yet"
                         fi
                     elif (( current_size > 0 )); then
                         diag "Tar file exists but still growing: $((current_size / 1024 / 1024))MB"
@@ -1043,8 +1090,14 @@ load_extracted_image() {
         docker tag "$new_image" "$target_tag" || \
             fatal "Failed to tag image $new_image as $target_tag"
     else
-        # Fallback: parse docker load output
+        # Fallback: parse docker load output.
+        # Handles two message formats:
+        #   "Loaded image: repo:tag"        — tagged tar (most common)
+        #   "Loaded image ID: sha256:..."   — untagged tar (podman save without RepoTag)
         loaded_tag=$(echo "$load_output" | grep -oP 'Loaded image: \K.*' | head -1 || true)
+        if [[ -z "$loaded_tag" ]]; then
+            loaded_tag=$(echo "$load_output" | grep -oP 'Loaded image ID: \K.*' | head -1 || true)
+        fi
         if [[ -n "$loaded_tag" ]]; then
             if [[ "$loaded_tag" != "$target_tag" ]]; then
                 docker tag "$loaded_tag" "$target_tag" || \
@@ -1115,12 +1168,20 @@ tag_local_aliases() {
     fi
 
     local version_tag="${IMAGE_NAME}:${VERSION}"
-    local latest_tag="${IMAGE_NAME}:latest"
-
     docker tag "$source_tag" "$version_tag" || fatal "Failed to tag $source_tag as $version_tag"
-    docker tag "$source_tag" "$latest_tag" || fatal "Failed to tag $source_tag as $latest_tag"
 
-    log "Tagged local aliases: $version_tag, $latest_tag"
+    # Only tag latest locally when resolve_promote_latest would allow it.
+    # Avoids a stale local 'latest' tag misleading tooling on the same host
+    # when the build intentionally skips latest promotion (e.g. pinned version).
+    local promote_latest
+    promote_latest="$(resolve_promote_latest)"
+    if [[ "$promote_latest" == "true" ]]; then
+        local latest_tag="${IMAGE_NAME}:latest"
+        docker tag "$source_tag" "$latest_tag" || fatal "Failed to tag $source_tag as $latest_tag"
+        log "Tagged local aliases: $version_tag, $latest_tag"
+    else
+        log "Tagged local alias: $version_tag (latest skipped — promote_latest=$promote_latest)"
+    fi
 }
 
 #######################################
@@ -1216,11 +1277,13 @@ validate_runtime_image() {
     fi
 
     # --- Check 2: Verify critical services ---
-    # These services are expected in a healthy UniFi OS installation
+    # These services are expected in a healthy UniFi OS installation.
+    # postgresql is matched by glob to survive a major-version bump (PG 14 → 15/16).
     log "Check 2/4: Verifying critical services..."
-    local critical_services=("unifi-core" "nginx" "mongodb" "postgresql@14-main")
     local services_ok=true
 
+    # Fixed services
+    local critical_services=("unifi-core" "nginx" "mongodb")
     for svc in "${critical_services[@]}"; do
         if docker exec "$container_name" systemctl is-active "$svc" >/dev/null 2>&1; then
             log "  ✓ $svc is active"
@@ -1229,6 +1292,18 @@ validate_runtime_image() {
             services_ok=false
         fi
     done
+
+    # PostgreSQL: match whichever major version is installed
+    local pg_unit
+    pg_unit=$(docker exec "$container_name" \
+        systemctl list-units --type=service --state=active --no-legend 'postgresql@*' \
+        2>/dev/null | awk '{print $1; exit}' || true)
+    if [[ -n "$pg_unit" ]]; then
+        log "  ✓ $pg_unit is active"
+    else
+        warn "  ✗ no active postgresql@* service found"
+        services_ok=false
+    fi
 
     if [[ "$services_ok" != "true" ]]; then
         preserve_failure "$container_name" "$arch" "validation" "Critical service check failed"
@@ -1313,7 +1388,11 @@ validate_runtime_image() {
     # after restart, an unbounded `docker exec systemctl ...` can hang the CI job.
     log "Running services after validation:"
     if [[ "$systemd_state" == "running" || "$systemd_state" == "degraded" ]]; then
-        timeout 20 docker exec "$container_name" systemctl list-units --type=service --state=running 2>/dev/null             | grep -E '^\s*\S+\.service'             | head -15 >&2 || warn "  Could not list running services after validation"
+        timeout 20 docker exec "$container_name" \
+            systemctl list-units --type=service --state=running 2>/dev/null \
+            | grep -E '^\s*\S+\.service' \
+            | head -15 >&2 \
+            || warn "  Could not list running services after validation"
     else
         warn "  Skipping systemctl service summary because systemd is not ready after restart"
         print_container_state "$container_name" "  "
@@ -1413,7 +1492,7 @@ build_arch_image() {
     local output_dir="${BUILD_ARTIFACTS_DIR}/extract-${arch}"
 
     # Phase 1: Build extractor
-    build_extractor_image "$arch" "$installer_url" extractor_tag
+    build_extractor_image "$arch" extractor_tag
 
     # Phase 2: Run extraction
     run_extraction "$arch" "$installer_url" "$extractor_tag" uosserver_tar
@@ -1439,6 +1518,9 @@ build_arch_image() {
     if [[ "$PUSH" == "true" ]]; then
         if [[ "$validation_result" == "degraded" && "${ALLOW_DEGRADED_PUBLISH:-false}" != "true" ]]; then
             fatal "Refusing to push degraded image for ${arch}. Set ALLOW_DEGRADED_PUBLISH=true to override."
+        fi
+        if [[ "$validation_result" == "skipped" ]]; then
+            warn "Publishing ${arch} image WITHOUT validation (SKIP_VALIDATION=true)"
         fi
         log "Pushing ${final_tag}"
         docker push "$final_tag" >&2
@@ -1480,6 +1562,9 @@ publish_manifests() {
     for validation_result in "${arch_validation_results[@]}"; do
         if [[ "$validation_result" == "degraded" && "${ALLOW_DEGRADED_PUBLISH:-false}" != "true" ]]; then
             fatal "Refusing to publish manifests: a build is degraded"
+        fi
+        if [[ "$validation_result" == "skipped" ]]; then
+            warn "Publishing manifest for image built WITHOUT validation (SKIP_VALIDATION=true)"
         fi
     done
 
@@ -1531,6 +1616,7 @@ publish_manifests() {
 
 main() {
     require_cmd docker
+    require_cmd curl
     require_cmd grep
     require_cmd sed
     require_cmd jq
@@ -1587,18 +1673,20 @@ Usage:
     ./build.sh
 
 Environment variables:
-    UNIFI_OS_URL_X64       amd64 installer URL (auto-fetched from ui.com if not set)
-    UNIFI_OS_URL_ARM64     arm64 installer URL (auto-fetched from ui.com if not set)
-    IMAGE_NAME             Target image name (default: giiibates/unifi-os-server)
-    VERSION                Override version tag (derived from URL if not set)
-    PLATFORMS              Target platforms (default: linux/amd64, supports: linux/amd64,linux/arm64)
-    PUSH                   Push images (default: true)
-    PROMOTE_LATEST         Promote latest tag: auto, true, false (default: auto)
-    SKIP_VALIDATION        Skip runtime validation (default: false)
-    ALLOW_DEGRADED_PUBLISH Push image even when validation result is degraded (default: false)
-    BUILD_ARTIFACTS_DIR    Directory for artifacts (default: /tmp/uos-build-PID)
-    BUILD_DATE             ISO8601 timestamp for reproducible builds (default: current git commit time, else current time)
+    UNIFI_OS_URL_X64           amd64 installer URL (auto-fetched from ui.com if not set)
+    UNIFI_OS_URL_ARM64         arm64 installer URL (auto-fetched from ui.com if not set)
+    IMAGE_NAME                 Target image name (default: giiibates/unifi-os-server)
+    VERSION                    Override version tag (derived from URL if not set)
+    PLATFORMS                  Target platforms (default: linux/amd64,linux/arm64)
+    PUSH                       Push images (default: true)
+    PROMOTE_LATEST             Promote latest tag: auto, true, false (default: auto)
+    SKIP_VALIDATION            Skip runtime validation (default: false)
+    ALLOW_DEGRADED_PUBLISH     Push image even when validation result is degraded (default: false)
+    BUILD_ARTIFACTS_DIR        Directory for artifacts (default: /tmp/uos-build-PID)
+    BUILD_DATE                 ISO8601 timestamp for reproducible builds (default: current git commit time, else current time)
     PRESERVE_FAILURE_CONTAINERS  Keep containers on failure for debugging (default: true)
+    EXPORT_FAILURE_FILESYSTEM  Export container filesystem on failure (default: false, can be multi-GB)
+    DOWNLOAD_API_URL           Ubiquiti download API endpoint (default: https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server)
 
 Architecture:
     Docker Host
@@ -1619,7 +1707,7 @@ Failure handling:
     - reason.txt: failure summary
     - inspect.json: docker inspect output
     - stdout.log/stderr.log: container logs
-    - filesystem.tar: container filesystem export
+    - filesystem.tar: container filesystem export (only if EXPORT_FAILURE_FILESYSTEM=true)
     - podman-*.txt: inner podman state (if available)
 EOF
 }
