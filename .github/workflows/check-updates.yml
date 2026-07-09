@@ -228,14 +228,13 @@ jobs:
           CURRENT_VERSION: ${{ steps.check.outputs.current_version }}
           LATEST_VERSION: ${{ steps.check.outputs.latest_version }}
           NEW_VERSION_AVAILABLE: ${{ steps.check.outputs.new_version_available }}
-          # URLs come from the Ubiquiti API. Pass via env (not inline ${{ }})
-          # to prevent shell injection: GitHub expands ${{ }} textually before
-          # the shell runs, so a crafted URL containing $(...) or backticks
-          # would execute in the runner. The URL validation upstream only
-          # enforces ^https://[^[:space:]]+$, which allows shell-special chars.
           URL_X64: ${{ steps.check.outputs.url_x64 }}
           URL_ARM64: ${{ steps.check.outputs.url_arm64 }}
         run: |
+          # All values above come via env (not inline ${{ }}) to prevent shell
+          # injection — GitHub expands ${{ }} textually before the shell runs.
+          # URL_X64/URL_ARM64 originate from the Ubiquiti API and are only
+          # validated as ^https://[^[:space:]]+$, which allows shell-special chars.
           {
             echo "## UniFi OS Server Version Check"
             echo ""

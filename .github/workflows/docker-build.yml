@@ -478,11 +478,12 @@ jobs:
       - name: Create and push manifest
         id: manifest
         env:
-          # Pass dispatch inputs via env to avoid direct ${{ }} interpolation
-          # in the shell script — same pattern as the build steps.
           INPUT_VERSION: ${{ github.event.inputs.version }}
           INPUT_PROMOTE_LATEST: ${{ github.event.inputs.promote_latest }}
         run: |
+          # INPUT_VERSION / INPUT_PROMOTE_LATEST are set via env (not inline
+          # ${{ }}) to prevent shell injection — GitHub expands ${{ }} textually
+          # before the shell runs, same pattern as the build steps.
           AMD_VERSION="${{ needs.build-amd64.outputs.version }}"
           ARM_VERSION="${{ needs.build-arm64.outputs.version }}"
           VERSION="$AMD_VERSION"
