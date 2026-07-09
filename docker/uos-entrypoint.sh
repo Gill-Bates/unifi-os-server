@@ -1,11 +1,15 @@
 #!/bin/bash
 # Entrypoint for UniFi OS Server runtime container.
 # Based on lemker/unifi-os-server approach - runs systemd directly.
-# -E: ERR trap inherited by functions/subshells
+# -E: ERR trap is inherited by functions and subshells (see trap below)
 # -e: exit on error
 # -u: treat unset variables as errors (all optional vars use ${VAR:-} defaults)
 # -o pipefail: pipe fails if any command in the pipe fails
 set -Eeuo pipefail
+
+# ERR trap: print file, line, and failing command to stderr before exiting.
+# -E (errtrace) ensures this fires inside functions and subshells too.
+trap 'printf "[entrypoint] ERROR at %s:%s — command: %s\n" "${BASH_SOURCE[0]}" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 # -----------------------------------------------------------------------------
 # Colors & Formatting
@@ -29,7 +33,7 @@ fi
 # -----------------------------------------------------------------------------
 # Banner
 # -----------------------------------------------------------------------------
-printf "${C_BLUE}${C_BOLD}"
+printf '%b' "${C_BLUE}${C_BOLD}"
 cat << 'BANNER'
              _    ___ _                                                     
             (_)  / __|_)                                                    
@@ -57,8 +61,11 @@ log_warn()    { printf "  ${C_YELLOW}  ⚠ %s${C_RESET}\n" "$*" >&2; }
 log_error()   { printf "  ${C_RED}  ✖ %s${C_RESET}\n" "$*" >&2; }
 
 # -----------------------------------------------------------------------------
-# DRY helper for directory initialization
-# -----------------------------------------------------------------------------
+# DRY helper for directory initialization.
+# chown failures are suppressed (the user may not exist yet on first boot, or
+# the mount may be owned correctly already).  chmod is NOT suppressed: a
+# permission error here indicates a restrictive mount that would break the
+# service anyway, and set -e should surface it rather than continue silently.
 ensure_dir() {
     local dir="$1" owner="${2:-root}" perms="${3:-755}"
     mkdir -p "$dir"
@@ -149,7 +156,14 @@ else
     log_success "UOS_UUID: $(cat /data/uos_uuid) (existing)"
 fi
 
-# Read version from env and write version string
+# Read version from env and write version string.
+# Validate format before writing — UOS_SERVER_VERSION is read by UniFi
+# components that parse /usr/lib/version; a control char or injection attempt
+# should be caught here, consistent with the validation discipline elsewhere.
+if ! printf '%s' "$UOS_SERVER_VERSION" | grep -Eq '^[0-9][0-9.]*$'; then
+    log_error "Invalid UOS_SERVER_VERSION: $UOS_SERVER_VERSION"
+    exit 1
+fi
 echo "UOSSERVER.0000000.$UOS_SERVER_VERSION.0000000.000000.0000" > /usr/lib/version
 log_success "Version: $UOS_SERVER_VERSION"
 
@@ -220,6 +234,34 @@ done
 # Fix: Start PostgreSQL early, create all required DBs/users idempotently,
 # then let systemd handle the services normally.
 # -----------------------------------------------------------------------------
+
+# Stop the temporary preseed PostgreSQL instance cleanly.
+# Defined at module scope — Bash has no local functions, and a nested definition
+# would leak into the global namespace AND reference preseed_postgres's locals
+# via dynamic scoping, which breaks under set -u outside that call frame.
+# Paths are passed explicitly as parameters instead.
+_stop_preseed_postgres() {
+    local pg_data="$1" pg_bin="$2" pg_log="$3"
+
+    if [ ! -f "$pg_data/postmaster.pid" ]; then
+        return 0
+    fi
+
+    if ! runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast -w -t 30 >> "$pg_log" 2>&1; then
+        if [ -f "$pg_data/postmaster.pid" ]; then
+            log_error "PostgreSQL temporary stop failed (see $pg_log)"
+            return 1
+        fi
+    fi
+
+    if [ -f "$pg_data/postmaster.pid" ]; then
+        log_error "PostgreSQL postmaster.pid still exists after stop (see $pg_log)"
+        return 1
+    fi
+
+    return 0
+}
+
 preseed_postgres() {
     local start_time=$SECONDS
     
@@ -227,27 +269,6 @@ preseed_postgres() {
     local pg_bin="/usr/lib/postgresql/14/bin"
     local pg_log="/var/log/postgresql/preseed.log"
     local pg_run="/var/run/postgresql"
-
-    stop_preseed_postgres() {
-        if [ ! -f "$pg_data/postmaster.pid" ]; then
-            return 0
-        fi
-
-        if ! runuser -u postgres -- "$pg_bin/pg_ctl" -D "$pg_data" stop -m fast -w -t 30 >> "$pg_log" 2>&1; then
-            if [ -f "$pg_data/postmaster.pid" ]; then
-                log_error "PostgreSQL temporary stop failed (see $pg_log)"
-                return 1
-            fi
-        fi
-
-        if [ -f "$pg_data/postmaster.pid" ]; then
-            log_error "PostgreSQL postmaster.pid still exists after stop (see $pg_log)"
-            return 1
-        fi
-
-        return 0
-    }
-    
     # This function is called from an if-statement below, which suppresses bash
     # errexit for the function body. Keep setup steps explicitly checked so an
     # unexpected failure here does not silently fall through.
@@ -303,7 +324,7 @@ preseed_postgres() {
     
     if [ $retries -eq 0 ]; then
         log_warn "PostgreSQL not accepting connections, will retry on next boot"
-        stop_preseed_postgres || return 1
+        _stop_preseed_postgres "$pg_data" "$pg_bin" "$pg_log" || return 1
         return 1
     fi
     log_success "PostgreSQL running"
@@ -375,6 +396,9 @@ preseed_postgres() {
             else
                 log_error "Failed: $dbname"
                 failed=$((failed + 1))
+                # Skip GRANT — the database does not exist, so the GRANT would
+                # also fail and count the same root cause twice in the summary.
+                continue
             fi
         else
             existed=$((existed + 1))
@@ -389,7 +413,7 @@ preseed_postgres() {
     done
     
     # Stop PostgreSQL before systemd starts its managed instance.
-    if ! stop_preseed_postgres; then
+    if ! _stop_preseed_postgres "$pg_data" "$pg_bin" "$pg_log"; then
         return 1
     fi
     
@@ -406,6 +430,14 @@ preseed_postgres() {
 # Preseed marker is versioned to allow re-seeding on image upgrades.
 # If new DBs are added to the list above, increment this version.
 # Marker lives in pg_data so it stays in sync with actual PostgreSQL state.
+#
+# NOTE on PostgreSQL major-version upgrades (e.g. 14 → 16):
+# pg_data path changes (/var/lib/postgresql/14/main → /var/lib/postgresql/16/main),
+# so the marker in the old path will NOT be found and preseed_postgres will re-run.
+# This is intentional — the new cluster is empty and must be seeded.
+# However, the db_configs list above may also need updating if new services were
+# added in the upgraded version. Bump PRESEED_MARKER_VERSION whenever db_configs
+# changes so that existing volumes are re-seeded with the updated list.
 PRESEED_MARKER_VERSION="2"
 PG_DATA="/var/lib/postgresql/14/main"
 PRESEED_MARKER="${PG_DATA}/.uos_postgres_preseeded_v${PRESEED_MARKER_VERSION}"
@@ -422,7 +454,16 @@ if [ ! -f "$PRESEED_MARKER" ]; then
         touch "$PRESEED_MARKER"
         chown postgres:postgres "$PRESEED_MARKER"
     else
-        log_warn "Pre-seeding incomplete; marker not written"
+        # Preseed failure is fatal. The entire motivation for this step is to
+        # prevent the race condition where upstream pre-start.sh scripts run
+        # against an unseeded or half-seeded cluster and fail non-deterministically.
+        # Booting into that state is the worst case: some createdb calls will hit
+        # "already exists" and fail hard, others will not — behaviour becomes
+        # unpredictable. Exiting here lets the container restart policy retry with
+        # a clean slate rather than producing a partially-started, broken install.
+        log_error "PostgreSQL pre-seeding failed — refusing to start with an unseeded cluster."
+        log_error "Check the PostgreSQL preseed log and fix the underlying issue before restarting."
+        exit 1
     fi
 else
     log_section "PostgreSQL Setup"
@@ -434,10 +475,10 @@ SYS_VENDOR="/sys/class/dmi/id/sys_vendor"
 if { [ -f "$SYS_VENDOR" ] && grep -qs "Synology" "$SYS_VENDOR"; } \
     || [ "${HARDWARE_PLATFORM:-}" = "synology" ]; then
 
-    if [ -n "${HARDWARE_PLATFORM+1}" ]; then
-        log_info "Setting HARDWARE_PLATFORM to $HARDWARE_PLATFORM"
+    if [ "${HARDWARE_PLATFORM:-}" = "synology" ]; then
+        log_info "HARDWARE_PLATFORM=synology, applying patches..."
     else
-        log_info "Synology hardware found, applying patches..."
+        log_info "Synology hardware detected via DMI, applying patches..."
     fi
 
     # Set postgresql overrides
@@ -473,11 +514,11 @@ if [ -n "${UOS_SYSTEM_IP:-}" ]; then
         printf 'system_ip=%s\n' "$UOS_SYSTEM_IP" > "$UNIFI_SYSTEM_PROPERTIES"
     else
         if grep -q "^system_ip=.*" "$UNIFI_SYSTEM_PROPERTIES"; then
-            tmp_file=$(mktemp)
-            grep -v '^system_ip=' "$UNIFI_SYSTEM_PROPERTIES" > "$tmp_file"
-            printf 'system_ip=%s\n' "$UOS_SYSTEM_IP" >> "$tmp_file"
-            install -m 0644 "$tmp_file" "$UNIFI_SYSTEM_PROPERTIES"
-            rm -f "$tmp_file"
+            # Use sed -i (in-place) to preserve the file's existing owner and
+            # mode. A mktemp + install approach resets ownership to root:root,
+            # which breaks re-adoption if the unifi service writes this file as
+            # a non-root user.
+            sed -i "s|^system_ip=.*|system_ip=${UOS_SYSTEM_IP}|" "$UNIFI_SYSTEM_PROPERTIES"
         else
             printf 'system_ip=%s\n' "$UOS_SYSTEM_IP" >> "$UNIFI_SYSTEM_PROPERTIES"
         fi
@@ -528,7 +569,15 @@ if [ "$UOS_SHOW_JOURNAL" = "true" ] && [ ! -e "$JOURNAL_FORWARDER_LOCK" ]; then
             printf '[journal-forwarder] journald socket not available after 60 s\n' >&2
             exit 0
         fi
-        exec journalctl -f --output=short-iso-precise --no-hostname 2>/dev/null
+        # The socket may exist slightly before journald's journal directory is
+        # fully initialised (/run/log/journal). Retry journalctl up to 10 times
+        # with a 1 s backoff so a short startup race does not silence the forwarder.
+        attempts=0
+        while [ $attempts -lt 10 ]; do
+            journalctl -f --output=short-iso-precise --no-hostname 2>/dev/null && break
+            attempts=$((attempts + 1))
+            sleep 1
+        done
     ) &
 fi
 
