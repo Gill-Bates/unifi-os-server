@@ -231,10 +231,11 @@ jobs:
           URL_X64: ${{ steps.check.outputs.url_x64 }}
           URL_ARM64: ${{ steps.check.outputs.url_arm64 }}
         run: |
-          # All values above come via env (not inline ${{ }}) to prevent shell
-          # injection — GitHub expands ${{ }} textually before the shell runs.
-          # URL_X64/URL_ARM64 originate from the Ubiquiti API and are only
-          # validated as ^https://[^[:space:]]+$, which allows shell-special chars.
+          # All values above come via env (not inline expressions) to prevent
+          # shell injection — GitHub expands context expressions textually before
+          # the shell runs. URL_X64/URL_ARM64 originate from the Ubiquiti API
+          # and are only validated as ^https://[^[:space:]]+$, which allows
+          # shell-special chars like $, (, ), and backticks.
           {
             echo "## UniFi OS Server Version Check"
             echo ""

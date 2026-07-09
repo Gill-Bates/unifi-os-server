@@ -103,8 +103,8 @@ jobs:
           UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          # INPUT_VERSION is set in env above (not inline ${{ }}) to prevent
-          # shell injection: GitHub expands ${{ }} textually before shell runs.
+          # INPUT_VERSION is set in env above (not inline expressions) to prevent
+          # shell injection: GitHub expands expressions textually before shell runs.
           BUILD_DATE="$(git -C "$GITHUB_WORKSPACE" log -1 --format=%cI)"
           export BUILD_DATE
           echo "Using reproducible BUILD_DATE=${BUILD_DATE}"
@@ -125,7 +125,7 @@ jobs:
           fi
 
           # EXPECTED_VERSION comes from the workflow input via env: to avoid
-          # direct ${{ }} interpolation into the shell script (injection risk).
+          # direct expressions interpolation into the shell script (injection risk).
           EXPECTED_VERSION="${INPUT_VERSION}"
           if [[ -n "$EXPECTED_VERSION" && "$VERSION" != "$EXPECTED_VERSION" ]]; then
             echo "Resolved image version ($VERSION) does not match requested version ($EXPECTED_VERSION)" >&2
@@ -482,7 +482,7 @@ jobs:
           INPUT_PROMOTE_LATEST: ${{ github.event.inputs.promote_latest }}
         run: |
           # INPUT_VERSION / INPUT_PROMOTE_LATEST are set via env (not inline
-          # ${{ }}) to prevent shell injection — GitHub expands ${{ }} textually
+          # expressions) to prevent shell injection — GitHub expands expressions textually
           # before the shell runs, same pattern as the build steps.
           AMD_VERSION="${{ needs.build-amd64.outputs.version }}"
           ARM_VERSION="${{ needs.build-arm64.outputs.version }}"
