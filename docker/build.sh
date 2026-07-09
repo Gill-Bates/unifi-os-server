@@ -1178,8 +1178,16 @@ validate_runtime_image() {
     local systemd_state=""
 
     while (( elapsed < timeout )); do
-        systemd_state=$(timeout 10 docker exec "$container_name" systemctl is-system-running 2>/dev/null || echo "unknown")
-        
+        # systemctl is-system-running exits non-zero for any state other than
+        # "running" (e.g. "starting" = exit 1, "degraded" = exit 1).
+        # Using || echo "unknown" would silently replace the real state with
+        # "unknown" whenever systemd has not fully started yet, causing the
+        # loop to never match "starting|initializing" and always fall through
+        # to the container-exit check. Capture stdout and stderr separately so
+        # the real state word is always preserved.
+        systemd_state=$(timeout 10 docker exec "$container_name" systemctl is-system-running 2>/dev/null; true)
+        systemd_state="${systemd_state:-unknown}"
+
         case "$systemd_state" in
             running|degraded)
                 log "  systemd ready: $systemd_state"
@@ -1285,7 +1293,8 @@ validate_runtime_image() {
             fatal "Validation failed: container did not survive restart"
         fi
 
-        systemd_state=$(timeout 10 docker exec "$container_name" systemctl is-system-running 2>/dev/null || echo "unknown")
+        systemd_state=$(timeout 10 docker exec "$container_name" systemctl is-system-running 2>/dev/null; true)
+        systemd_state="${systemd_state:-unknown}"
         if [[ "$systemd_state" == "running" || "$systemd_state" == "degraded" ]]; then
             log "  ✓ Container survived restart (systemd: $systemd_state)"
             break
