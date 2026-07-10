@@ -214,19 +214,19 @@ analyze_journal() {
 # ---------------------------------------------------------------------------
 printf '%b' "${BLUE}${BOLD}"
 cat << 'BANNER'
-             _    ___ _                                                     
-            (_)  / __|_)                                                    
- _   _ ____  _ _| |__ _     ___   ___     ___ _____  ____ _   _ _____  ____ 
-| | | |  _ \| (_   __) |   / _ \ /___)   /___) ___ |/ ___) | | | ___ |/ ___)
-| |_| | | | | | | |  | |  | |_| |___ |  |___ | ____| |    \ V /| ____| |    
-|____/|_| |_|_| |_|  |_|   \___/(___/   (___/|_____)_|     \_/ |_____)_|    
+             _  __ _       _ _                             _   _          
+ _   _ _ __ (_)/ _(_)   __| (_) __ _  __ _ _ __   ___  ___| |_(_) ___ ___ 
+| | | | '_ \| | |_| |  / _` | |/ _` |/ _` | '_ \ / _ \/ __| __| |/ __/ __|
+| |_| | | | | |  _| | | (_| | | (_| | (_| | | | | (_) \__ \ |_| | (__\__ \
+ \__,_|_| |_|_|_| |_|  \__,_|_|\__,_|\__, |_| |_|\___/|___/\__|_|\___|___/
+                                     |___/                                
 BANNER
 printf '%b' "${R}"
 printf "  ${GRAY}────────────────────────────────────────────────────${R}\n"
 printf "  ${DIM}Diagnostics${R}  ${CYAN}https://github.com/Gill-Bates/unifi-os-server${R}\n"
 printf "  ${GRAY}────────────────────────────────────────────────────${R}\n"
 printf '\n'
-printf "  ${GRAY}⚠  Community project — NOT affiliated with Ubiquiti Inc.${R}\n"
+printf "  ${GRAY}⚠ This tool is NOT affiliated with Ubiquiti Inc.${R}\n"
 printf "  ${GRAY}   UniFi® is a registered trademark of Ubiquiti Inc.${R}\n"
 printf '\n'
 printf "  ${GRAY}Timestamp : ${R}${CYAN}%s${R}\n" "$(date '+%Y-%m-%dT%H:%M:%S %Z')"
