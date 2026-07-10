@@ -34,7 +34,7 @@ on:
           - 'true'
           - 'false'
       dev_image:
-        description: 'Create Dev Image — tag as :dev instead of :VERSION (skips release and latest promotion)'
+        description: 'Create Dev Image'
         required: false
         default: 'false'
         type: choice

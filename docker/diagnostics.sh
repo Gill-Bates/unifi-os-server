@@ -425,8 +425,8 @@ elif ! systemctl is-active --quiet "${PG_UNIT}" 2>/dev/null; then
     row_warn "Databases" "PostgreSQL not running — skipped"
 else
     ALL_DBS_OK=1
-    for db in "ulp-go" "ulp-go-syslog" "uid" "unifi-credential-server" \
-              "ucs-user-assets" "ucs-agent" "unifi-directory" "unifi-identity-update"; do
+    for db in "ulp-go" "ulp-go-syslog" "uid" \
+              "ucs-agent" "unifi-directory" "unifi-identity-update"; do
         EXISTS="$(runuser -u postgres -- "${PG_BIN}/psql" -tAc \
             "SELECT 1 FROM pg_database WHERE datname='${db}'" 2>/dev/null \
             | tr -d '[:space:]' || echo '')"
@@ -589,7 +589,11 @@ if ! systemctl is-active --quiet systemd-journald 2>/dev/null; then
     WARNINGS=$((WARNINGS+1))
 else
     SYS_ERRORS="$(journalctl --since "15 minutes ago" -p err..emerg \
-        --no-pager --output=short-iso 2>/dev/null | grep -v '^-- ' || true)"
+        --no-pager --output=short-iso 2>/dev/null \
+        | grep -v '^-- ' \
+        | grep -v 'systemd-gpt-auto-generator' \
+        | grep -v 'smartd\[' \
+        || true)"
 
     # F1 fix: || true suppresses exitcode 1 on zero matches without adding "0\n0"
     SYS_ERROR_COUNT="$(printf '%s\n' "$SYS_ERRORS" | grep -c '[^[:space:]]' || true)"
