@@ -335,7 +335,7 @@ This does not delete persistent data.
 The image includes a built-in diagnostic tool. Run it against a running container to get a structured summary of service states, database health, ports, disk usage, and recent errors:
 
 ```bash
-docker exec -it unifi-os-server diagnostics
+docker exec -it <container_name> diagnostics
 ```
 
 The tool checks:
