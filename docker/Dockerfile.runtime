@@ -28,6 +28,9 @@ ENV UOS_SHOW_JOURNAL="false"
 # Copy our entrypoint that configures the container before starting systemd
 COPY --chmod=755 docker/uos-entrypoint.sh /usr/local/bin/uos-entrypoint.sh
 
+# Copy diagnostics tool
+COPY --chmod=755 docker/diagnostics.sh /usr/local/bin/diagnostics
+
 # systemd needs SIGRTMIN+3 for clean shutdown
 STOPSIGNAL SIGRTMIN+3
 

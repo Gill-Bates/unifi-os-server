@@ -229,7 +229,7 @@ cd unifi-os-server
 ### 2. Create persistent data directories
 
 ```bash
-mkdir -p data/{persistent,var-log,data,srv,var-lib-unifi,var-lib-mongodb,etc-rabbitmq-ssl}
+mkdir -p data/{persistent,var-log,data,srv,var-lib-unifi,var-lib-postgresql,var-lib-mongodb,etc-rabbitmq-ssl}
 ```
 
 ### 3. Configure `UOS_SYSTEM_IP`
@@ -308,6 +308,20 @@ environment:
   - UOS_SHOW_JOURNAL=true
 ```
 
+### `UOS_UUID`
+
+Optional. A fixed UUIDv5-format identifier for this UniFi OS Server instance.
+If not set, a UUID is generated automatically on first boot and persisted to `./data/uos_uuid`.
+
+Set this explicitly if you need the identity to survive container recreation without persistent `/data`:
+
+```yaml
+environment:
+  - UOS_UUID=xxxxxxxx-xxxx-5xxx-xxxx-xxxxxxxxxxxx
+```
+
+Must match the UUIDv5 format (`xxxxxxxx-xxxx-5xxx-[89ab]xxx-xxxxxxxxxxxx`). An invalid value will abort startup.
+
 ---
 
 ## Ports
@@ -354,6 +368,25 @@ This does not delete persistent data.
 ---
 
 ## Troubleshooting
+
+### Self-Check
+
+The image includes a built-in diagnostic tool. Run it against a running container to get a structured summary of service states, database health, ports, disk usage, and recent errors:
+
+```bash
+docker exec -it unifi-os-server diagnostics
+```
+
+The tool checks:
+- systemd is running as PID 1 and cgroup v2 is active
+- all UniFi and supporting services (PostgreSQL, MongoDB, RabbitMQ, nginx) and their states
+- required PostgreSQL databases exist
+- required TCP/UDP ports are listening
+- persistent volume mounts and available disk space
+- UOS UUID, version file, and `system_ip` configuration
+- error-level journal entries from the last 15 minutes
+
+Exit code `0` means all checks passed. Any failure or warning produces exit code `1`.
 
 ### Device adoption does not work
 
