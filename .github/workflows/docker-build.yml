@@ -50,6 +50,14 @@ on:
           - 'auto'
           - 'true'
           - 'false'
+      dev_image:
+        description: 'Create Dev Image — tag as :dev instead of :VERSION (skips release and latest promotion)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 env:
   REGISTRY: docker.io
   IMAGE_NAME: giiibates/unifi-os-server
@@ -480,15 +488,16 @@ jobs:
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
           INPUT_PROMOTE_LATEST: ${{ github.event.inputs.promote_latest }}
+          INPUT_DEV_IMAGE: ${{ github.event.inputs.dev_image }}
         run: |
-          # INPUT_VERSION / INPUT_PROMOTE_LATEST are set via env (not inline
-          # expressions) to prevent shell injection — GitHub expands expressions textually
-          # before the shell runs, same pattern as the build steps.
+          # INPUT_* are set via env (not inline expressions) to prevent shell
+          # injection — GitHub expands expressions textually before the shell runs.
           AMD_VERSION="${{ needs.build-amd64.outputs.version }}"
           ARM_VERSION="${{ needs.build-arm64.outputs.version }}"
           VERSION="$AMD_VERSION"
           REQUESTED_VERSION="${INPUT_VERSION}"
           PROMOTE_LATEST_INPUT="${INPUT_PROMOTE_LATEST}"
+          DEV_IMAGE="${INPUT_DEV_IMAGE:-false}"
           REGISTRY_TOKEN="$(
             curl -fsSL \
               "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAME}:pull" \
@@ -597,6 +606,15 @@ jobs:
               ;;
           esac
 
+          # Dev image: tag as :dev, never promote latest, skip version check
+          if [[ "$DEV_IMAGE" == "true" ]]; then
+            PROMOTE_LATEST=false
+            MANIFEST_TAG="${IMAGE_NAME}:dev"
+            echo "Dev image mode: tagging as :dev, skipping latest promotion and version guard"
+          else
+            MANIFEST_TAG="${IMAGE_NAME}:${VERSION}"
+          fi
+
           if [[ "$PROMOTE_LATEST" == "true" ]]; then
             if CURRENT_LATEST_VERSION="$(fetch_current_latest_version)"; then
               echo "Current latest version: ${CURRENT_LATEST_VERSION}"
@@ -616,19 +634,19 @@ jobs:
           fi
           
           echo "Creating manifest with: ${IMAGES[*]}"
+          echo "Manifest tag: ${MANIFEST_TAG}"
           echo "Promote latest: ${PROMOTE_LATEST}"
 
           # Keep the currently published stable tags in place until the new
-          # manifest has been pushed successfully. Replacing a tag is safe;
-          # deleting it first creates avoidable downtime if the push fails.
-          docker manifest rm "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1 || true
+          # manifest has been pushed successfully.
+          docker manifest rm "${MANIFEST_TAG}" >/dev/null 2>&1 || true
           if [[ "$PROMOTE_LATEST" == "true" ]]; then
             docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
           fi
 
-          # Create version manifest
-          docker manifest create "${IMAGE_NAME}:${VERSION}" "${IMAGES[@]}" --amend
-          docker manifest push "${IMAGE_NAME}:${VERSION}" || { echo "Versioned manifest push failed" >&2; exit 1; }
+          # Create and push primary manifest (:VERSION or :dev)
+          docker manifest create "${MANIFEST_TAG}" "${IMAGES[@]}" --amend
+          docker manifest push "${MANIFEST_TAG}" || { echo "Manifest push failed: ${MANIFEST_TAG}" >&2; exit 1; }
           
           if [[ "$PROMOTE_LATEST" == "true" ]]; then
             docker manifest create "${IMAGE_NAME}:latest" "${IMAGES[@]}" --amend
@@ -638,13 +656,14 @@ jobs:
           fi
           
           echo "Pushed manifests:"
-          echo "  ${IMAGE_NAME}:${VERSION}"
+          echo "  ${MANIFEST_TAG}"
           if [[ "$PROMOTE_LATEST" == "true" ]]; then
             echo "  ${IMAGE_NAME}:latest"
           fi
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "promote_latest=${PROMOTE_LATEST}" >> "$GITHUB_OUTPUT"
+          echo "dev_image=${DEV_IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Delete arch-specific tags from Docker Hub
         # Only run when the manifest step succeeded — running on failure would
