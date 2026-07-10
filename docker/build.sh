@@ -1233,12 +1233,18 @@ validate_runtime_image() {
     fi
 
     # --- Check 1: Wait for systemd ---
+    # Poll with exponential backoff: start at 2s, double each iteration up to a
+    # 30s cap. This polls aggressively early (when systemd reaches 'running'
+    # fastest) and backs off if the boot is slow (JVM start, first-boot DB init).
+    # Hard ceiling: 300s (5 min) — enough for the heaviest first-boot scenario.
     log "Check 1/4: Waiting for systemd..."
-    local timeout=90
+    local systemd_timeout=300
     local elapsed=0
+    local sleep_interval=2
+    local sleep_max=30
     local systemd_state=""
 
-    while (( elapsed < timeout )); do
+    while (( elapsed < systemd_timeout )); do
         # systemctl is-system-running exits non-zero for any state other than
         # "running" (e.g. "starting" = exit 1, "degraded" = exit 1).
         # Using || echo "unknown" would silently replace the real state with
@@ -1251,7 +1257,7 @@ validate_runtime_image() {
 
         case "$systemd_state" in
             running|degraded)
-                log "  systemd ready: $systemd_state"
+                log "  systemd ready: $systemd_state (${elapsed}s)"
                 break
                 ;;
             starting|initializing)
@@ -1267,12 +1273,15 @@ validate_runtime_image() {
                 ;;
         esac
 
-        sleep 2
-        elapsed=$((elapsed + 2))
+        sleep "$sleep_interval"
+        elapsed=$(( elapsed + sleep_interval ))
+        # Double the interval, cap at sleep_max
+        sleep_interval=$(( sleep_interval * 2 ))
+        (( sleep_interval > sleep_max )) && sleep_interval=$sleep_max
     done
 
     if [[ "$systemd_state" != "running" && "$systemd_state" != "degraded" ]]; then
-        warn "  systemd did not reach running state within ${timeout}s (state: $systemd_state)"
+        warn "  systemd did not reach running state within ${systemd_timeout}s (state: $systemd_state)"
         validation_state="degraded"
     fi
 
@@ -1311,16 +1320,32 @@ validate_runtime_image() {
     fi
 
     # --- Check 3: Verify listening ports ---
-    # Expected ports for UniFi OS services
+    # unifi-core (8443/8080) can lag behind systemd-ready by a minute or more
+    # on first boot while the JVM initialises and waits for DB migrations.
+    # Poll each port independently with exponential backoff so a fast start
+    # (e.g. warm volume) exits quickly, while a slow start gets enough time.
     log "Check 3/4: Verifying listening ports..."
     local expected_ports=("443" "8443" "8080" "27017")
     local ports_ok=true
+    local port_timeout=180  # per-port ceiling
 
     for port in "${expected_ports[@]}"; do
-        if docker exec "$container_name" ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-            log "  ✓ Port $port is listening"
-        else
-            warn "  ✗ Port $port is not listening"
+        local p_elapsed=0
+        local p_interval=2
+        local p_ready=false
+        while (( p_elapsed < port_timeout )); do
+            if docker exec "$container_name" ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+                log "  ✓ Port $port is listening (${p_elapsed}s)"
+                p_ready=true
+                break
+            fi
+            sleep "$p_interval"
+            p_elapsed=$(( p_elapsed + p_interval ))
+            p_interval=$(( p_interval * 2 ))
+            (( p_interval > 30 )) && p_interval=30
+        done
+        if [[ "$p_ready" != "true" ]]; then
+            warn "  ✗ Port $port is not listening (after ${port_timeout}s)"
             ports_ok=false
         fi
     done
