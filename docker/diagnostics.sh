@@ -13,6 +13,7 @@
 #  Exit codes:
 #     0  all checks passed
 #     1  one or more failures or warnings
+#     2  preflight failed (required tools missing in image)
 # =============================================================================
 set -uo pipefail
 
@@ -26,6 +27,32 @@ WHITE=$'\033[97m'
 
 if [ ! -t 1 ] && [ "${FORCE_COLOR:-}" != "1" ]; then
     R="" BOLD="" DIM="" BLUE="" CYAN="" GREEN="" YELLOW="" RED="" GRAY="" WHITE=""
+fi
+
+# ---------------------------------------------------------------------------
+# Spec thresholds
+# Source: https://help.ui.com/hc/en-us/articles/34210126298775
+#   RAM   : minimum 2 GB (official spec)
+#   Disk  : 10 GB free at install time (spec) / 2 GB runtime floor (fail)
+# ---------------------------------------------------------------------------
+SPEC_RAM_MB=2048
+WARN_RAM_MB="${DIAGNOSTICS_WARN_RAM_MB:-3072}"
+SPEC_DISK_MB=10240
+CRIT_DISK_MB="${DIAGNOSTICS_CRIT_DISK_MB:-2048}"
+
+# ---------------------------------------------------------------------------
+# Dependency preflight — fail fast if required tools are missing.
+# runuser is needed for PostgreSQL DB checks (section 4).
+# ---------------------------------------------------------------------------
+MISSING_TOOLS=()
+for _tool in systemctl journalctl ss mountpoint df awk grep sed runuser; do
+    command -v "$_tool" >/dev/null 2>&1 || MISSING_TOOLS+=("$_tool")
+done
+if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
+    printf '%s%s✖  Missing required tools: %s%s\n' "$RED" "$BOLD" "${MISSING_TOOLS[*]}" "$R"
+    printf '   Report this with your architecture (%s) at:\n' "$(uname -m)"
+    printf '   https://github.com/Gill-Bates/unifi-os-server/issues\n'
+    exit 2
 fi
 
 # ---------------------------------------------------------------------------
@@ -74,13 +101,18 @@ render_table() {
     printf "%s  %-3s  %-*s  %s%s\n" \
         "$GRAY" "   " "$w_label" "Check" "Info" "$R"
     printf "%s  %s%s\n" "$GRAY" \
-        "$(printf '─%.0s' $(seq 1 $((w_label + w_note + 10))))" "$R"
+        "$(printf -- '-%.0s' $(seq 1 $((w_label + w_note + 10))))" "$R"
 
     # Rows
     for i in "${!TABLE_ROWS[@]}"; do
         local row="${TABLE_ROWS[$i]}"
         local status cat lbl note icon color
         IFS='|' read -r status cat lbl note <<< "$row"
+        # F6: strip multibyte chars from note before measuring — use ASCII-only
+        # display values to avoid printf width miscalculation.
+        local note_display
+        note_display="$(printf '%s' "$note" | LC_ALL=C sed \
+            's/[>=]/>/g; s/--/-/g')" 2>/dev/null || note_display="$note"
         case "$status" in
             OK)   icon="✔"; color="$GREEN"  ;;
             WARN) icon="⚠"; color="$YELLOW" ;;
@@ -90,7 +122,7 @@ render_table() {
         printf "  %s%s%s  %-*s  %s%s%s\n" \
             "$color" "$icon" "$R" \
             "$w_label" "$lbl" \
-            "$DIM" "$note" "$R"
+            "$DIM" "$note_display" "$R"
 
         # Print any detail lines that belong to this row index (1-based)
         local row_idx=$(( i + 1 ))
@@ -104,7 +136,7 @@ render_table() {
         done
     done
     printf "%s  %s%s\n" "$GRAY" \
-        "$(printf '─%.0s' $(seq 1 $((w_label + w_note + 10))))" "$R"
+        "$(printf -- '-%.0s' $(seq 1 $((w_label + w_note + 10))))" "$R"
 
     # Reset buffers for next section
     TABLE_ROWS=()
@@ -125,9 +157,11 @@ analyze_journal() {
     [ -z "$log" ] && { detail_line "No journal data for ${svc}."; return; }
 
     detail_line "Last journal entries:"
-    printf '%s\n' "$log" | tail -15 | while IFS= read -r line; do
+    # F1 fix: process substitution keeps the while loop in the main shell,
+    # so log_line appends to DETAIL_LINES in the correct process context.
+    while IFS= read -r line; do
         log_line "$line"
-    done
+    done < <(printf '%s\n' "$log" | tail -15)
 
     if   printf '%s\n' "$log" | grep -qE 'status=6/ABRT'; then
         hint_line "SIGABRT (status=6): assertion failure or corrupted heap."
@@ -140,8 +174,15 @@ analyze_journal() {
         hint_line "OOM kill: container has insufficient memory."
         hint_line "Run: docker stats  — then raise memory limit in docker-compose.yaml."
     elif printf '%s\n' "$log" | grep -qiE 'epmd|erlang|beam\.smp'; then
-        hint_line "RabbitMQ/Erlang crash. Remove stale mnesia data:"
-        hint_line "rm -rf /var/lib/rabbitmq/mnesia && systemctl restart rabbitmq-server"
+        # Gate on rabbitmq-server to avoid false positives from other Erlang users.
+        # mnesia contains RabbitMQ definitions — recommend backup before wiping.
+        if [ "$svc" = "rabbitmq-server" ]; then
+            hint_line "RabbitMQ/Erlang crash — often stale mnesia state."
+            hint_line "Backup first: cp -a /var/lib/rabbitmq/mnesia /var/lib/rabbitmq/mnesia.bak"
+            hint_line "Then: rm -rf /var/lib/rabbitmq/mnesia && systemctl restart rabbitmq-server"
+        else
+            hint_line "Erlang/BEAM crash in ${svc}. Check service logs for details."
+        fi
     elif printf '%s\n' "$log" | grep -qiE 'permission denied|EACCES'; then
         hint_line "Permission denied. Check volume ownership:"
         hint_line "docker exec <container> ls -la /var/lib/ /data/"
@@ -159,6 +200,9 @@ analyze_journal() {
     local rc
     rc="$(printf '%s\n' "$log" | grep -oE 'restart counter is at [0-9]+' \
         | grep -oE '[0-9]+' | tail -1 || true)"
+    # F7: tail exits 0 on empty input, so || echo '?' never fires.
+    # Use parameter expansion default instead.
+    rc="${rc:-}"
     if [ -n "$rc" ] && [ "$rc" -ge 5 ]; then
         hint_line "Crash loop: service has restarted ${rc} times."
         hint_line "Causes: missing config, port conflict, OOM, or corrupt data."
@@ -187,7 +231,57 @@ printf "  ${GRAY}   UniFi® is a registered trademark of Ubiquiti Inc.${R}\n"
 printf '\n'
 printf "  ${GRAY}Timestamp : ${R}${CYAN}%s${R}\n" "$(date '+%Y-%m-%dT%H:%M:%S %Z')"
 printf "  ${GRAY}Container : ${R}${WHITE}%s${R}\n" "$(hostname)"
-printf "  ${GRAY}Image     : ${R}${WHITE}%s${R}\n" "${UOS_SERVER_VERSION:-unknown}"
+_ARCH="$(uname -m)"
+printf "  ${GRAY}Image     : ${R}${WHITE}%s (%s)${R}\n" "${UOS_SERVER_VERSION:-unknown}" "$_ARCH"
+
+# ===========================================================================
+# 0. SYSTEM RESOURCES
+# Thresholds derived from official spec:
+# https://help.ui.com/hc/en-us/articles/34210126298775-Self-Hosting-UniFi
+#   RAM  : minimum 2 GB | warn below 3 GB (OOM-prone under real load)
+#   Disk : 10 GB free = install spec (warn) | 2 GB = runtime floor (fail)
+# ===========================================================================
+_CAT="Resources"
+
+# RAM — prefer cgroup memory limit over host total (reflects container reality)
+CG_PATH="$(awk -F: '$1=="0"{print $3}' /proc/self/cgroup 2>/dev/null || echo '')"
+MEM_MAX="$(cat "/sys/fs/cgroup${CG_PATH}/memory.max" 2>/dev/null || echo 'max')"
+HOST_MEM_MB="$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)"
+
+if [ "$MEM_MAX" = "max" ]; then
+    MEM_MB="$HOST_MEM_MB"
+    MEM_SRC="host total, no container limit set"
+else
+    MEM_MB=$(( MEM_MAX / 1024 / 1024 ))
+    MEM_SRC="container limit"
+fi
+
+if   [ "$MEM_MB" -lt "$SPEC_RAM_MB" ]; then
+    row_fail "RAM" "${MEM_MB} MB (${MEM_SRC}) — below official minimum of ${SPEC_RAM_MB} MB"
+    hint_line "Increase the container memory limit or add more host RAM."
+elif [ "$MEM_MB" -lt "$WARN_RAM_MB" ]; then
+    row_warn "RAM" "${MEM_MB} MB (${MEM_SRC}) — meets spec minimum, OOM-prone under load"
+    hint_line "MongoDB + PostgreSQL + RabbitMQ + JVM often exceed 2 GB. Recommend ≥3 GB."
+else
+    row_ok   "RAM" "${MEM_MB} MB (${MEM_SRC})"
+fi
+
+# Disk — check the data volume (primary write target)
+DATA_DIR="${DIAGNOSTICS_DATA_DIR:-/var/lib}"
+DISK_FREE_MB="$(df -P -k "$DATA_DIR" 2>/dev/null | awk 'NR==2{print int($4/1024)}')"
+if   [ -z "${DISK_FREE_MB:-}" ]; then
+    row_warn "Disk" "could not determine free space on ${DATA_DIR}"
+elif [ "$DISK_FREE_MB" -lt "$CRIT_DISK_MB" ]; then
+    row_fail "Disk" "${DISK_FREE_MB} MB free on ${DATA_DIR} — databases will degrade or stop"
+    hint_line "Free disk space immediately. MongoDB and PostgreSQL will corrupt data on full disk."
+elif [ "$DISK_FREE_MB" -lt "$SPEC_DISK_MB" ]; then
+    row_warn "Disk" "${DISK_FREE_MB} MB free on ${DATA_DIR} — spec recommends ≥${SPEC_DISK_MB} MB free"
+    hint_line "Official spec: at least 10 GB free. Monitor and expand before it runs out."
+else
+    row_ok   "Disk" "${DISK_FREE_MB} MB free on ${DATA_DIR}"
+fi
+
+render_table "System Resources  (spec: ≥2 GB RAM, ≥10 GB disk)"
 
 # ===========================================================================
 # 1. SYSTEM
@@ -272,6 +366,9 @@ _CAT="Supporting Services"
 
 PG_UNIT="$(systemctl list-units --all 'postgresql@*' --no-legend --plain 2>/dev/null \
     | awk 'NR==1{print $1}')"
+# F2 fix: list-units returns the full unit name including .service suffix —
+# strip it before using as argument to systemctl cat / is-active.
+PG_UNIT="${PG_UNIT%.service}"
 PG_UNIT="${PG_UNIT:-postgresql@14-main}"
 
 SUPPORT_SERVICES=(
@@ -348,61 +445,94 @@ fi
 render_table "PostgreSQL Databases"
 
 # ===========================================================================
-# 5. NETWORK PORTS
+# 5. NETWORK LISTENERS
+# Per official port reference + spec (TCP 8080, UDP 3478, TCP 443).
+# Note: this checks whether the container is listening. A green result does
+# NOT guarantee reachability from outside — host firewall rules and
+# docker-compose "ports:" mappings are outside the container's view.
 # ===========================================================================
-_CAT="Ports"
+_CAT="Listeners"
 
-check_port() {
-    local port="$1" proto="${2:-tcp}" label="$3"
-    if ss -ln${proto} 2>/dev/null | awk '{print $5}' | grep -qE ":${port}$"; then
-        row_ok  "${port}/${proto}" "$label"
+LISTENERS="$(ss -tulnH 2>/dev/null || true)"
+
+# format: "proto:port:label"
+PORT_LIST=(
+    "tcp:443:Web UI / HTTPS (host→11443)"
+    "tcp:8080:Device Inform"
+    "tcp:8443:UniFi Network API"
+    "udp:3478:STUN — device adoption"
+    "udp:10003:Device discovery"
+)
+
+for entry in "${PORT_LIST[@]}"; do
+    IFS=':' read -r proto port label <<< "$entry"
+    if printf '%s\n' "$LISTENERS" | grep -qE "^${proto}.*[: ]${port}( |$)"; then
+        row_ok  "${port}/${proto}" "${label}"
     else
-        row_fail "${port}/${proto}" "NOT listening — $label"
+        row_fail "${port}/${proto}" "NOT listening — ${label}"
         hint_line "Check which service owns this port and review its journal."
+        hint_line "If listening: verify host firewall and 'ports:' mapping in docker-compose.yaml."
     fi
-}
+done
 
-check_port 443   tcp "UniFi OS web UI (host→11443)"
-check_port 8080  tcp "Device communication / inform"
-check_port 8443  tcp "UniFi Network application API"
-check_port 3478  udp "STUN — device adoption"
-check_port 10003 udp "Device discovery"
-
-render_table "Network Ports"
+render_table "Network Listeners"
 
 # ===========================================================================
-# 6. DISK & VOLUMES
+# 6. BIND-MOUNTS & VOLUME PATHS
+# Tiers aligned to docker-compose.yaml:
+#   required = declared as a volume in the project compose file
+#   optional = useful to mount but not declared; absence is acceptable
+# F3 fix: only required mounts warn/fail; optional mounts are informational.
 # ===========================================================================
 _CAT="Volumes"
 
-for entry in \
-    "/persistent:Persistent config" \
-    "/data:Application data" \
-    "/var/lib/unifi:UniFi data" \
-    "/var/lib/postgresql:PostgreSQL data" \
-    "/var/lib/mongodb:MongoDB data" \
-    "/var/log:Log files"; do
+# "path:label:tier" — required entries match the compose volumes block
+VOLUME_LIST=(
+    "/persistent:Persistent config:required"
+    "/var/log:Log files:required"
+    "/data:Application data:required"
+    "/srv:Srv data:required"
+    "/var/lib/unifi:UniFi data:required"
+    "/var/lib/postgresql:PostgreSQL data:required"
+    "/var/lib/mongodb:MongoDB data:required"
+    "/etc/rabbitmq/ssl:RabbitMQ SSL certs:required"
+)
 
-    mnt="${entry%%:*}"; label="${entry##*:}"
+for entry in "${VOLUME_LIST[@]}"; do
+    mnt="${entry%%:*}"; rest="${entry#*:}"; label="${rest%%:*}"; tier="${rest##*:}"
+
+    if ! [ -d "$mnt" ]; then
+        if [ "$tier" = "required" ]; then
+            row_fail "$label" "path does not exist: ${mnt}"
+            hint_line "Create the directory and add a bind-mount in docker-compose.yaml."
+        else
+            row_info "$label" "not present (optional)"
+        fi
+        continue
+    fi
 
     if mountpoint -q "$mnt" 2>/dev/null; then
         AVAIL_KB="$(df -k --output=avail "$mnt" 2>/dev/null | tail -1 | tr -d ' ' || echo 0)"
         AVAIL_MB=$(( AVAIL_KB / 1024 ))
-        if   [ "$AVAIL_MB" -lt 200 ]; then
-            row_fail "$label" "CRITICAL: ${AVAIL_MB} MB free  (${mnt})"
-            hint_line "Disk critically low — services may crash."
-        elif [ "$AVAIL_MB" -lt 500 ]; then
-            row_warn "$label" "${AVAIL_MB} MB free  (${mnt})"
+        if   [ "$AVAIL_MB" -lt "$CRIT_DISK_MB" ]; then
+            row_fail "$label" "CRITICAL: ${AVAIL_MB} MB free (${mnt})"
+            hint_line "Disk critically low — services may crash or corrupt data."
+        elif [ "$AVAIL_MB" -lt "$SPEC_DISK_MB" ]; then
+            row_warn "$label" "${AVAIL_MB} MB free (${mnt}) — spec recommends >= ${SPEC_DISK_MB} MB"
         else
-            row_ok   "$label" "${AVAIL_MB} MB free  (${mnt})"
+            row_ok   "$label" "${AVAIL_MB} MB free (${mnt})"
         fi
     else
-        row_warn "$label" "not bind-mounted — data lost on restart"
-        hint_line "Add a volume mount for '${mnt}' in docker-compose.yaml."
+        if [ "$tier" = "required" ]; then
+            row_warn "$label" "not bind-mounted — data lost when container is recreated"
+            hint_line "Add a volume mount for '${mnt}' in docker-compose.yaml."
+        else
+            row_info "$label" "not mounted (container-local, acceptable)"
+        fi
     fi
 done
 
-render_table "Disk & Persistent Volumes"
+render_table "Bind-Mounts & Volume Paths"
 
 # ===========================================================================
 # 7. CONFIGURATION
@@ -411,8 +541,11 @@ _CAT="Config"
 
 if [ -f /data/uos_uuid ]; then
     UUID="$(cat /data/uos_uuid)"
+    # The entrypoint generates a random UUID and sets the version nibble to '5'
+    # (cosmetic — UniFi only validates the format, not the generation algorithm).
+    # Accept version 1-5 to stay valid if Ubiquiti changes the generator upstream.
     printf '%s' "$UUID" | grep -Eq \
-        '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-5[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' \
+        '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$' \
         && row_ok  "UOS UUID" "$UUID" \
         || { row_fail "UOS UUID" "invalid format: ${UUID}"; }
 else
@@ -485,7 +618,10 @@ else
             for ls in $LOOP_SVCS; do
                 LOOP_N="$(printf '%s\n' "$SYS_ERRORS" | grep "$ls" \
                     | grep -oE 'restart counter is at [0-9]+' \
-                    | grep -oE '[0-9]+' | tail -1 || echo '?')"
+                    | grep -oE '[0-9]+' | tail -1 || true)"
+                # F7: tail exits 0 on empty input so || echo '?' never fires;
+                # use parameter expansion default instead.
+                LOOP_N="${LOOP_N:-?}"
                 printf "  %s   💡 Crash loop: %s has restarted %sx%s\n" "$CYAN" "$ls" "$LOOP_N" "$R"
             done
         fi
