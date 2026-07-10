@@ -277,50 +277,12 @@ These settings are required for UniFi OS Server to start and shut down correctly
 
 ## Important Environment Variables
 
-### `UOS_SYSTEM_IP`
-
-Address used by UniFi devices and controllers to reach the server.
-
-```yaml
-environment:
-  - UOS_SYSTEM_IP=unifi.example.com
-```
-
-### `HARDWARE_PLATFORM`
-
-Optional setting for Synology-specific runtime patches.
-
-```yaml
-environment:
-  - HARDWARE_PLATFORM=synology
-```
-
-Use this only when running on Synology hardware or when the documented Synology patch behavior is required.
-
-### `UOS_SHOW_JOURNAL`
-
-Controls whether the full systemd journal is forwarded to Docker logs.
-The default is `false`, so `docker logs` shows only the startup banner and
-entrypoint summary. Set it to `true` for verbose service logs.
-
-```yaml
-environment:
-  - UOS_SHOW_JOURNAL=true
-```
-
-### `UOS_UUID`
-
-Optional. A fixed UUIDv5-format identifier for this UniFi OS Server instance.
-If not set, a UUID is generated automatically on first boot and persisted to `./data/uos_uuid`.
-
-Set this explicitly if you need the identity to survive container recreation without persistent `/data`:
-
-```yaml
-environment:
-  - UOS_UUID=xxxxxxxx-xxxx-5xxx-xxxx-xxxxxxxxxxxx
-```
-
-Must match the UUIDv5 format (`xxxxxxxx-xxxx-5xxx-[89ab]xxx-xxxxxxxxxxxx`). An invalid value will abort startup.
+| Variable | Required | Default | Description |
+|---|:---:|:---:|---|
+| `UOS_SYSTEM_IP` | ✔ | — | Address (hostname or IP) that UniFi devices use to reach this server. Example: `unifi.example.com` |
+| `UOS_SHOW_JOURNAL` | | `false` | Forward the full systemd journal to `docker logs`. Set to `true` for verbose service logs. |
+| `UOS_UUID` | | auto | Fixed UUIDv5 identifier for this instance. Useful when the identity must survive container recreation without a persistent `/data` mount. Must match format `xxxxxxxx-xxxx-5xxx-[89ab]xxx-xxxxxxxxxxxx`. An invalid value aborts startup. |
+| `HARDWARE_PLATFORM` | | — | Set to `synology` to enable Synology-specific runtime patches. Only required on Synology hardware. |
 
 ---
 
@@ -330,13 +292,13 @@ The Compose file already defines the required port mappings.
 
 Commonly used ports:
 
-| Port | Protocol | Purpose |
-|---:|:---:|---|
-| `11443` | TCP | UniFi OS web interface |
-| `8080` | TCP | Device communication |
-| `8443` | TCP | UniFi Network application |
-| `3478` | UDP | STUN and adoption |
-| `10003` | UDP | Device discovery |
+| Port | Protocol | Required | Purpose |
+|---:|:---:|:---:|---|
+| `11443` | TCP | ✔ | UniFi OS web interface |
+| `8080` | TCP | ✔ | Device communication |
+| `8443` | TCP | ✔ | UniFi Network application |
+| `3478` | UDP | ✔ | STUN and adoption |
+| `10003` | UDP | | Device discovery |
 
 Optional services may expose additional ports depending on your UniFi setup. Unused optional mappings can be removed from `docker-compose.yaml`.
 
