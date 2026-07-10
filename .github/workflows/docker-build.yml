@@ -129,7 +129,7 @@ jobs:
         with:
           name: failure-artifacts-amd64
           path: /tmp/uos-build-*/failure-*
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: ignore
 
       - name: Trivy vulnerability scan (amd64)
@@ -182,7 +182,7 @@ jobs:
         with:
           name: trivy-findings-amd64
           path: trivy-amd64.json
-          retention-days: 14
+          retention-days: 90
           if-no-files-found: warn
 
       - name: Smoke test amd64 image
@@ -312,7 +312,7 @@ jobs:
         with:
           name: failure-artifacts-arm64
           path: /tmp/uos-build-*/failure-*
-          retention-days: 7
+          retention-days: 90
           if-no-files-found: ignore
 
       - name: Trivy vulnerability scan (arm64)
@@ -365,7 +365,7 @@ jobs:
         with:
           name: trivy-findings-arm64
           path: trivy-arm64.json
-          retention-days: 14
+          retention-days: 90
           if-no-files-found: warn
 
       - name: Smoke test arm64 image
@@ -1119,7 +1119,7 @@ jobs:
               amd64: `${runUrl}#artifacts`,
               arm64: `${runUrl}#artifacts`
             };
-            // Note: GitHub Action artifacts expire (retention: 14 days).
+            // Note: GitHub Action artifacts expire after 90 days (retention-days: 90).
             // Links in this release body will stop working after that window.
             const availableTags = [
               '- `' + imageName + ':' + version + '` (multi-arch: linux/amd64, linux/arm64)'
@@ -1140,11 +1140,11 @@ jobs:
               '',
               '### Security Scan Results',
               '',
-              '| Architecture | Status | Findings |',
-              '|--------------|--------|----------|',
-              '| amd64 | ' + trivyAmd64 + ' | [trivy-findings-amd64](' + findingsLinks.amd64 + ') (expires 14d) |',
-              '| arm64 | ' + trivyArm64 + ' | [trivy-findings-arm64](' + findingsLinks.arm64 + ') (expires 14d) |',
-              '| run | workflow details | [Actions Run](' + runUrl + ') |',
+              '| Architecture | Status | Findings | Expires |',
+              '|--------------|--------|----------|---------|',
+              '| amd64 | ' + trivyAmd64 + ' | [trivy-findings-amd64](' + findingsLinks.amd64 + ') | 90d |',
+              '| arm64 | ' + trivyArm64 + ' | [trivy-findings-arm64](' + findingsLinks.arm64 + ') | 90d |',
+              '| run | workflow details | [Actions Run](' + runUrl + ') | — |',
               '',
               '> Scanned with [Trivy](https://trivy.dev/) for HIGH and CRITICAL severity vulnerabilities (unfixed CVEs ignored).',
               '',
