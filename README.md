@@ -330,72 +330,20 @@ This does not delete persistent data.
 
 ## Troubleshooting
 
-### Self-Check
-
-The image includes a built-in diagnostic tool. Run it against a running container to get a structured summary of service states, database health, ports, disk usage, and recent errors:
+Start with the built-in diagnostic tool — it covers most common failure scenarios:
 
 ```bash
 docker exec -it <container_name> diagnostics
 ```
 
-The tool checks:
-- systemd is running as PID 1 and cgroup v2 is active
-- all UniFi and supporting services (PostgreSQL, MongoDB, RabbitMQ, nginx) and their states
-- required PostgreSQL databases exist
-- required TCP/UDP ports are listening
-- persistent volume mounts and available disk space
-- UOS UUID, version file, and `system_ip` configuration
-- error-level journal entries from the last 15 minutes
+It checks services, databases, ports, disk space, volume mounts, and recent journal errors. Exit code `0` means all checks passed.
 
-Exit code `0` means all checks passed. Any failure or warning produces exit code `1`.
+For issues the tool doesn't resolve:
 
-### Device adoption does not work
-
-Check the following:
-
-- `UOS_SYSTEM_IP` points to the correct reachable hostname or IP address
-- `8080/tcp` is reachable from the device network
-- `3478/udp` is not blocked by a firewall or NAT
-- `10003/udp` is available if discovery is required
-- the host firewall allows the mapped ports
-
-### Web interface is not reachable
-
-Check container status:
-
-```bash
-docker compose ps
-```
-
-Check logs:
-
-```bash
-docker compose logs -f
-```
-
-Verify that the host port is listening:
-
-```bash
-ss -tulpen | grep 11443
-```
-
----
-
-## Data Persistence
-
-Persistent data is stored below:
-
-```text
-./data/
-```
-
-Do not delete this directory unless you intentionally want to reset UniFi OS Server data.
-
-Recommended backup target:
-
-```text
-./data/
-```
+| Symptom | What to check |
+|---|---|
+| Device adoption fails | `UOS_SYSTEM_IP` set and reachable; `8080/tcp`, `3478/udp` not blocked by firewall or NAT |
+| Web interface unreachable | `docker compose ps`; `docker compose logs -f`; `ss -tulpen \| grep 11443` |
 
 ---
 
