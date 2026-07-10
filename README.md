@@ -261,15 +261,14 @@ https://<your-host>:11443
 
 The provided `docker-compose.yaml` already includes the required runtime settings.
 
-These settings are required for UniFi OS Server to start and shut down correctly:
-
-- `cgroup: host`
-- `NET_RAW`
-- `NET_ADMIN`
-- systemd-compatible `tmpfs` mounts
-- persistent data mounts under `./data/...`
-- correct stop signal handling
-- required TCP and UDP port mappings
+| Setting | Value | Why it's needed |
+|---|---|---|
+| `cgroup` | `host` | systemd requires access to the host cgroup hierarchy |
+| `cap_add` | `NET_RAW`, `NET_ADMIN` | Required for network configuration and device adoption |
+| `tmpfs` | `/run`, `/run/lock`, `/tmp`, `/var/opt/unifi/tmp` | systemd and UniFi services need writable in-memory paths at startup |
+| `volumes` | `/sys/fs/cgroup:/sys/fs/cgroup:rw` | Direct cgroup mount required by systemd inside the container |
+| `volumes` | `./data/...` | Persistent storage — data survives container recreation |
+| `stop_signal` | `SIGRTMIN+3` | Tells systemd to shut down cleanly instead of being force-killed |
 
 > Do not remove these settings unless you know exactly which UniFi OS component no longer needs them.
 
@@ -277,12 +276,12 @@ These settings are required for UniFi OS Server to start and shut down correctly
 
 ## Important Environment Variables
 
-| Variable | Required | Default | Description |
+| Variable | Default | Required | Description |
 |---|:---:|:---:|---|
-| `UOS_SYSTEM_IP` | ✔ | — | Address (hostname or IP) that UniFi devices use to reach this server. Example: `unifi.example.com` |
-| `UOS_SHOW_JOURNAL` | | `false` | Forward the full systemd journal to `docker logs`. Set to `true` for verbose service logs. |
-| `UOS_UUID` | | auto | Fixed UUIDv5 identifier for this instance. Useful when the identity must survive container recreation without a persistent `/data` mount. Must match format `xxxxxxxx-xxxx-5xxx-[89ab]xxx-xxxxxxxxxxxx`. An invalid value aborts startup. |
-| `HARDWARE_PLATFORM` | | — | Set to `synology` to enable Synology-specific runtime patches. Only required on Synology hardware. |
+| `UOS_SYSTEM_IP` | — | ✔ | Address (hostname or IP) that UniFi devices use to reach this server. Example: `unifi.example.com` |
+| `UOS_SHOW_JOURNAL` | `false` | | Forward the full systemd journal to `docker logs`. Set to `true` for verbose service logs. |
+| `UOS_UUID` | auto | | Fixed UUIDv5 identifier for this instance. Useful when the identity must survive container recreation without a persistent `/data` mount. Must match format `xxxxxxxx-xxxx-5xxx-[89ab]xxx-xxxxxxxxxxxx`. An invalid value aborts startup. |
+| `HARDWARE_PLATFORM` | — | | Set to `synology` to enable Synology-specific runtime patches. Only required on Synology hardware. |
 
 ---
 
