@@ -593,6 +593,12 @@ else
         | grep -v '^-- ' \
         | grep -v 'systemd-gpt-auto-generator' \
         | grep -v 'smartd\[' \
+        | grep -v 'unifi\[.*\]: user: unifi' \
+        | grep -v 'unifi\[.*\]: data:' \
+        | grep -v 'unifi\[.*\]: tmpfs:' \
+        | grep -v 'unifi\[.*\]: Warning: Could not mount tmpfs' \
+        | grep -v 'unifi\[.*\]: Skipping load-environment' \
+        | grep -v 'unifi\[.*\]: init-uos complete' \
         || true)"
 
     # F1 fix: || true suppresses exitcode 1 on zero matches without adding "0\n0"
