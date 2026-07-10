@@ -10,6 +10,7 @@
 !docker/build.sh
 !docker/entrypoint.sh
 !docker/uos-entrypoint.sh
+!docker/diagnostics.sh
 !docker/extract-uosserver.sh
 !docker/loginctl-stub.sh
 !docker/systemctl-stub.sh

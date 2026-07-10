@@ -11,25 +11,8 @@ on:
         options:
           - 'true'
           - 'false'
-      platforms:
-        description: 'Platforms to build (multi-arch only)'
-        required: false
-        default: 'linux/amd64,linux/arm64'  # Native runners available for both
-        type: choice
-        options:
-          - 'linux/amd64,linux/arm64'
       version:
         description: 'Pinned UniFi OS version (optional)'
-        required: false
-        default: ''
-        type: string
-      url_x64:
-        description: 'Pinned Linux x64 installer URL (optional)'
-        required: false
-        default: ''
-        type: string
-      url_arm64:
-        description: 'Pinned Linux arm64 installer URL (optional)'
         required: false
         default: ''
         type: string
@@ -75,7 +58,6 @@ jobs:
   build-amd64:
     name: Build amd64 image
     runs-on: ubuntu-24.04
-    if: github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
     outputs:
       version: ${{ steps.build.outputs.version }}
       trivy_summary: ${{ steps.trivy_summary.outputs.summary }}
@@ -107,8 +89,6 @@ jobs:
           PUSH: 'false'
           PLATFORMS: linux/amd64
           VERSION: ${{ github.event.inputs.version }}
-          UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
-          UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           # INPUT_VERSION is set in env above (not inline expressions) to prevent
@@ -167,6 +147,7 @@ jobs:
 
       - name: Generate Trivy summary (amd64)
         id: trivy_summary
+        if: success() || failure()
         run: |
           if [[ ! -f trivy-amd64.json ]]; then
             echo "summary=Scan failed - no results" >> "$GITHUB_OUTPUT"
@@ -258,7 +239,6 @@ jobs:
   build-arm64:
     name: Build arm64 image
     runs-on: ubuntu-24.04-arm  # Native arm64 runner - no QEMU emulation needed
-    if: github.event.inputs.platforms == 'linux/amd64,linux/arm64' || github.event.inputs.platforms == ''
     outputs:
       version: ${{ steps.build.outputs.version }}
       trivy_summary: ${{ steps.trivy_summary.outputs.summary }}
@@ -292,8 +272,6 @@ jobs:
           PUSH: 'false'
           PLATFORMS: linux/arm64
           VERSION: ${{ github.event.inputs.version }}
-          UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
-          UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
           # Reproducible BUILD_DATE: bind to the commit, not wall-clock time.
@@ -352,6 +330,7 @@ jobs:
 
       - name: Generate Trivy summary (arm64)
         id: trivy_summary
+        if: success() || failure()
         run: |
           if [[ ! -f trivy-arm64.json ]]; then
             echo "summary=Scan failed - no results" >> "$GITHUB_OUTPUT"
@@ -430,7 +409,6 @@ jobs:
 
             echo "Smoke test passed!"
           '
-          echo "Built version: ${VERSION}"
 
       - name: Push arm64 image
         if: github.event.inputs.push != 'false'
@@ -529,9 +507,24 @@ jobs:
 
           fetch_current_latest_version() {
             local manifest child_digest child_manifest config_digest config version
+            local http_status response
 
-            if ! manifest="$(fetch_manifest "latest" 2>/dev/null)"; then
-              return 2
+            # P2.3 fix: distinguish 404 (no latest) from transient errors.
+            # curl -f would treat both as failure — use -w '%{http_code}' instead.
+            response="$(
+              curl -sS -w '\n%{http_code}' \
+                -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+                -H "Accept: ${ACCEPT_HEADER}" \
+                "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/latest"
+            )"
+            http_status="$(printf '%s\n' "$response" | tail -n 1)"
+            manifest="$(printf '%s\n' "$response" | sed '$d')"
+
+            if [[ "$http_status" == "404" ]]; then
+              return 2   # No latest tag exists — promotion is allowed
+            elif [[ "$http_status" != "200" ]]; then
+              echo "Registry returned HTTP ${http_status} fetching latest manifest — treating as transient error" >&2
+              return 1   # Transient error — hard fail in caller, do not promote
             fi
 
             child_digest="$(jq -r '.manifests[]? | select(.platform.architecture == "amd64") | .digest' <<< "$manifest" | head -n 1)"
@@ -564,8 +557,11 @@ jobs:
             exit 1
           fi
 
-          if [[ "${{ needs.build-arm64.result }}" == "success" && "$ARM_VERSION" != "$AMD_VERSION" ]]; then
-            echo "Version mismatch between architectures: amd64=$AMD_VERSION arm64=$ARM_VERSION"
+          # arm64 version must match amd64 — the job-level if: already guarantees
+          # both build jobs succeeded, but the version values could still diverge
+          # if upstream published different versions per arch (should never happen).
+          if [[ "$ARM_VERSION" != "$AMD_VERSION" ]]; then
+            echo "Version mismatch between architectures: amd64=$AMD_VERSION arm64=$ARM_VERSION" >&2
             exit 1
           fi
           
@@ -638,8 +634,9 @@ jobs:
           echo "Manifest tag: ${MANIFEST_TAG}"
           echo "Promote latest: ${PROMOTE_LATEST}"
 
-          # Keep the currently published stable tags in place until the new
-          # manifest has been pushed successfully.
+          # docker manifest rm only removes a local manifest-list cache entry,
+          # not the published registry tag. The published tag stays live until
+          # the new manifest is successfully pushed and replaces it.
           docker manifest rm "${MANIFEST_TAG}" >/dev/null 2>&1 || true
           if [[ "$PROMOTE_LATEST" == "true" ]]; then
             docker manifest rm "${IMAGE_NAME}:latest" >/dev/null 2>&1 || true
@@ -667,10 +664,11 @@ jobs:
           echo "dev_image=${DEV_IMAGE}" >> "$GITHUB_OUTPUT"
 
       - name: Delete arch-specific tags from Docker Hub
-        # Only run when the manifest step succeeded — running on failure would
-        # delete the arch-specific tags even though no multi-arch manifest was
-        # published, leaving the version effectively unreachable on Hub.
+        # Cosmetic cleanup — a failure here must not block create-release since
+        # the manifest is already fully published. The stale arch tags will be
+        # cleaned up by the next successful build run.
         if: steps.manifest.conclusion == 'success' && steps.hubtoken.outputs.token != ''
+        continue-on-error: true
         env:
           HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
         run: |
@@ -686,43 +684,70 @@ jobs:
             elif [[ "${STATUS}" == "404" ]]; then
               echo "Arch tag not found (skipping): ${TAG}"
             else
-              echo "Unexpected HTTP ${STATUS} when deleting arch tag: ${TAG}" >&2
-              exit 1
+              echo "::warning::Unexpected HTTP ${STATUS} when deleting arch tag ${TAG} — will be cleaned on next run"
             fi
           done
 
-      - name: Prune stale untagged Docker Hub image objects
-        # continue-on-error: the manifest and arch images are already live at
-        # this point. A prune failure (rate limit, Hub API hiccup) must not
-        # block the downstream create-release job — the next build run will
-        # clean up whatever this run missed.
-        if: steps.manifest.conclusion == 'success' && steps.hubtoken.outputs.token != ''
+      - name: Delete arch-specific tags on manifest failure
+        # If create-manifest fails after the arch images are already on Hub,
+        # clean them up so they don't linger indefinitely. Runs only on failure
+        # so it never interferes with the normal delete step above.
+        #
+        # Trade-off: this prevents "Re-run failed jobs" for the manifest job
+        # alone — the arch tags are gone, so the arch image availability check
+        # would fail again. A full rebuild is required after a manifest failure.
+        # If retry-ability matters more than immediate cleanup, remove this step;
+        # the prune logic in the next successful run will catch orphaned arch tags
+        # (tags matching *-amd64/*-arm64 whose version already has a multi-arch
+        # manifest) on the following build.
+        if: failure() && steps.hubtoken.outputs.token != ''
         continue-on-error: true
         env:
           HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
         run: |
+          VERSION="${{ needs.build-amd64.outputs.version }}"
+          [[ -n "$VERSION" ]] || { echo "VERSION empty — skipping arch tag cleanup"; exit 0; }
+
+          echo "::warning::Manifest job failed — attempting to remove orphaned arch tags for ${VERSION}"
+          for ARCH in amd64 arm64; do
+            TAG="${VERSION}-${ARCH}"
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+              -H "Authorization: Bearer ${HUB_TOKEN}" \
+              "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${TAG}/")
+            echo "DELETE ${TAG}: HTTP ${STATUS}"
+          done
+
+      - name: Prune stale untagged Docker Hub image objects
+        # continue-on-error: manifest and images are already live. A prune failure
+        # (rate limit, Hub API hiccup) must not block create-release — the next
+        # build run will clean up whatever this run missed.
+        if: steps.manifest.conclusion == 'success' && steps.hubtoken.outputs.token != ''
+        continue-on-error: true
+        env:
+          HUB_TOKEN: ${{ steps.hubtoken.outputs.token }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
           set -euo pipefail
 
           VERSION="${{ needs.build-amd64.outputs.version }}"
-          #
-          # Multi-arch tags are an OCI/Docker image index plus child platform
-          # manifests. After deleting the intermediate -amd64/-arm64 tags, the
-          # child manifests often show up as inactive, but the published VERSION
-          # and latest index still reference them. Protect the currently
-          # published index digest(s) and child manifest digest(s) first, then
-          # delete only older inactive image objects.
 
           NAMESPACE="${IMAGE_NAME%%/*}"
           REPO="${IMAGE_NAME#*/}"
           IMAGES_BASE="https://hub.docker.com/v2/namespaces/${NAMESPACE}/repositories/${REPO}/images"
+
+          # P2.2 fix: use authenticated token — account-based rate limits are
+          # much higher than anonymous/IP-based limits, critical now that we
+          # fetch one manifest per published tag.
           REGISTRY_TOKEN="$(
             curl -fsSL \
+              -u "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
               "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAME}:pull" \
               | jq -r '.token // empty'
           )"
 
           if [[ -z "${REGISTRY_TOKEN}" ]]; then
-            echo "Failed to obtain Docker registry pull token" >&2
+            echo "Failed to obtain authenticated Docker registry pull token" >&2
             exit 1
           fi
 
@@ -733,45 +758,74 @@ jobs:
           protected="${tmpdir}/protected-digests.txt"
           : > "${protected}"
 
+          # Protect digests of ALL currently published tags.
+          # Correct error semantics (P1.1 fix):
+          #   404 → tag deleted between enumeration and fetch, skip safely.
+          #   any other error (429, 5xx, timeout) → abort entire prune.
+          #     An incomplete protected-list + running the delete loop is the
+          #     only combination that can corrupt live tags. A skipped prune
+          #     costs nothing — the next run cleans up.
           collect_protected_digests() {
             local tag="$1"
-            local optional="${2:-false}"
-            local manifest_file="${tmpdir}/manifest-${tag}.json"
-            local headers
+            local manifest_file="${tmpdir}/manifest-${tag//\//-}.json"
+            local response http_status digests_before digests_after
 
-            if ! headers="$(
-              curl -fsSIL \
-                  -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
-                  -H "Accept: ${ACCEPT_HEADER}" \
-                  "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${tag}"
-            )"; then
-              if [[ "$optional" == "true" ]]; then
-                echo "No published manifest found for ${tag}; skipping digest protection."
-                return 0
-              fi
-              echo "Published manifest ${tag} is missing; cannot protect digests before pruning." >&2
+            digests_before="$(wc -l < "${protected}")"
+
+            response="$(
+              curl -sSD - \
+                -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
+                -H "Accept: ${ACCEPT_HEADER}" \
+                -o "${manifest_file}" \
+                -w '\n%{http_code}' \
+                "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${tag}" \
+                2>/dev/null
+            )"
+            http_status="$(printf '%s\n' "$response" | tail -n 1)"
+
+            if [[ "$http_status" == "404" ]]; then
+              echo "Tag ${tag}: not found (deleted between enumeration and fetch) — skipping"
+              return 0
+            elif [[ "$http_status" != "200" ]]; then
+              # Any non-404 error means the protected list is incomplete.
+              # Abort the entire prune rather than risk deleting live children.
+              echo "Tag ${tag}: HTTP ${http_status} — protected list incomplete, aborting prune" >&2
               exit 1
             fi
 
-            echo "${headers}" \
-              | awk 'BEGIN{IGNORECASE=1} /^docker-content-digest:/ {gsub(/\r/, ""); print $2}' \
+            # Index digest from response header
+            printf '%s\n' "$response" \
+              | awk 'BEGIN{IGNORECASE=1} /^docker-content-digest:/ {gsub(/\r/,""); print $2}' \
               >> "${protected}"
 
-            curl -fsSL \
-              -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
-              -H "Accept: ${ACCEPT_HEADER}" \
-              "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${tag}" \
-              -o "${manifest_file}"
+            # Child platform manifest digests from body
+            jq -r '.manifests[]?.digest // empty' "${manifest_file}" 2>/dev/null \
+              >> "${protected}"
 
-            jq -r '.manifests[]?.digest // empty' "${manifest_file}" >> "${protected}"
+            digests_after="$(wc -l < "${protected}")"
+            echo "Protected tag ${tag}: +$((digests_after - digests_before)) digest(s) (${digests_after} total)"
           }
 
-          collect_protected_digests "${VERSION}"
-          collect_protected_digests "latest" true
+          # Enumerate all tags in the repository and protect every one.
+          # This is the only correct approach: we cannot know which tags exist
+          # without asking Hub, and pruning child manifests of any live tag
+          # would silently break pulls for that tag on the affected platform.
+          TAGS_URL="https://hub.docker.com/v2/repositories/${NAMESPACE}/${REPO}/tags?page_size=100"
+          while [[ -n "${TAGS_URL}" && "${TAGS_URL}" != "null" ]]; do
+            TAGS_PAGE="$(
+              curl -fsSL \
+                -H "Authorization: Bearer ${HUB_TOKEN}" \
+                "${TAGS_URL}"
+            )"
+            while IFS= read -r tag_name; do
+              [[ -n "$tag_name" ]] || continue
+              collect_protected_digests "${tag_name}"
+            done < <(printf '%s\n' "$TAGS_PAGE" | jq -r '.results[].name // empty')
+            TAGS_URL="$(printf '%s\n' "$TAGS_PAGE" | jq -r '.next // empty')"
+          done
 
           sort -u "${protected}" -o "${protected}"
-          echo "Protected digests:"
-          sed 's/^/  /' "${protected}"
+          echo "Total protected digests: $(wc -l < "${protected}")"
 
           PRUNED=0
           NEXT="${IMAGES_BASE}?status=inactive&page_size=100"
@@ -897,13 +951,6 @@ jobs:
                 .replace(/[ \t]+\n/g, '\n')
                 .replace(/\n{3,}/g, '\n\n')
                 .trim();
-            }
-
-            function hasMeaningfulHtml(html = '') {
-              // Strip HTML and normalize all whitespace (including &nbsp; → regular space)
-              const text = stripHtml(html).replace(/\s+/g, ' ').trim();
-              // Must have actual content (not just whitespace or empty)
-              return text.length > 0;
             }
 
             function renderTextSection(title, blocks) {
@@ -1072,6 +1119,8 @@ jobs:
               amd64: `${runUrl}#artifacts`,
               arm64: `${runUrl}#artifacts`
             };
+            // Note: GitHub Action artifacts expire (retention: 14 days).
+            // Links in this release body will stop working after that window.
             const availableTags = [
               '- `' + imageName + ':' + version + '` (multi-arch: linux/amd64, linux/arm64)'
             ];
@@ -1093,8 +1142,8 @@ jobs:
               '',
               '| Architecture | Status | Findings |',
               '|--------------|--------|----------|',
-              '| amd64 | ' + trivyAmd64 + ' | [trivy-findings-amd64](' + findingsLinks.amd64 + ') |',
-              '| arm64 | ' + trivyArm64 + ' | [trivy-findings-arm64](' + findingsLinks.arm64 + ') |',
+              '| amd64 | ' + trivyAmd64 + ' | [trivy-findings-amd64](' + findingsLinks.amd64 + ') (expires 14d) |',
+              '| arm64 | ' + trivyArm64 + ' | [trivy-findings-arm64](' + findingsLinks.arm64 + ') (expires 14d) |',
               '| run | workflow details | [Actions Run](' + runUrl + ') |',
               '',
               '> Scanned with [Trivy](https://trivy.dev/) for HIGH and CRITICAL severity vulnerabilities (unfixed CVEs ignored).',
