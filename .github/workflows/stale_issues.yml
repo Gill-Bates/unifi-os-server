@@ -16,8 +16,8 @@ jobs:
     steps:
       - uses: actions/stale@v10
         with:
-          # Mark issues as stale after 30 days of inactivity
-          days-before-issue-stale: 30
+          # Mark issues as stale after 60 days of inactivity
+          days-before-issue-stale: 60
 
           # Close issues 7 days after being marked as stale
           days-before-issue-close: 7
