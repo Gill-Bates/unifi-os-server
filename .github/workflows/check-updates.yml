@@ -279,6 +279,9 @@ jobs:
           script: |
             const refName = context.payload?.repository?.default_branch || context.ref.replace('refs/heads/', '');
 
+            // Pin the installer URLs resolved at check-time alongside the version so the
+            // build can't silently re-fetch a newer Ubiquiti release than what was checked
+            // (docker-build.yml only auto-fetches from the API when no URLs are provided).
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -286,7 +289,6 @@ jobs:
               ref: refName,
               inputs: {
                 push: 'true',
-                platforms: 'linux/amd64,linux/arm64',
                 version: process.env.LATEST_VERSION,
                 url_x64: process.env.URL_X64,
                 url_arm64: process.env.URL_ARM64,

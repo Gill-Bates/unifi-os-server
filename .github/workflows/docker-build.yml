@@ -16,6 +16,16 @@ on:
         required: false
         default: ''
         type: string
+      url_x64:
+        description: 'Pinned amd64 installer URL (optional; must match version). Leave empty to auto-fetch the latest from Ubiquiti at build time.'
+        required: false
+        default: ''
+        type: string
+      url_arm64:
+        description: 'Pinned arm64 installer URL (optional; must match version). Leave empty to auto-fetch the latest from Ubiquiti at build time.'
+        required: false
+        default: ''
+        type: string
       enforce_trivy_gate:
         description: 'Fail build on HIGH/CRITICAL Trivy findings'
         required: false
@@ -82,7 +92,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build amd64 image (auto-fetch URLs)
+      - name: Build amd64 image
         id: build
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
@@ -90,6 +100,7 @@ jobs:
           PLATFORMS: linux/amd64
           VERSION: ${{ github.event.inputs.version }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
+          UNIFI_OS_URL_X64: ${{ github.event.inputs.url_x64 }}
         run: |
           # INPUT_VERSION is set in env above (not inline expressions) to prevent
           # shell injection: GitHub expands expressions textually before shell runs.
@@ -265,7 +276,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build arm64 image (auto-fetch URLs)
+      - name: Build arm64 image
         id: build
         env:
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
@@ -273,6 +284,7 @@ jobs:
           PLATFORMS: linux/arm64
           VERSION: ${{ github.event.inputs.version }}
           INPUT_VERSION: ${{ github.event.inputs.version }}
+          UNIFI_OS_URL_ARM64: ${{ github.event.inputs.url_arm64 }}
         run: |
           # Reproducible BUILD_DATE: bind to the commit, not wall-clock time.
           # Identical source + installer -> identical image digest, so a rebuild
