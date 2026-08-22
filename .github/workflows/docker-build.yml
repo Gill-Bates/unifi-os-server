@@ -68,6 +68,11 @@ jobs:
   build-amd64:
     name: Build amd64 image
     runs-on: ubuntu-24.04
+    # Backstop only. build.sh bounds itself well below this (extraction 30min +
+    # validation ~25min), so its own timeouts fire first and still run the
+    # failure-artifact upload. A job timeout cancels the job outright and takes
+    # those artifacts with it, so it must sit *above* the internal ceiling.
+    timeout-minutes: 75
     outputs:
       version: ${{ steps.build.outputs.version }}
       trivy_summary: ${{ steps.trivy_summary.outputs.summary }}
@@ -238,6 +243,24 @@ jobs:
             find /usr /opt /var/lib -name "*.jar" -type f 2>/dev/null | head -5 \
               || echo "No JAR files"
 
+            echo "=== Diagnostics tool ==="
+            # Version-robust on purpose: only asserts the tool is shipped and still
+            # parses. Actually running it needs a live systemd, which build.sh
+            # Phase 5 (Check 4/5) covers against the freshly built image.
+            if ! test -x /usr/local/bin/diagnostics; then
+              echo "/usr/local/bin/diagnostics: MISSING or not executable" >&2
+              exit 1
+            fi
+            if ! command -v bash >/dev/null 2>&1; then
+              echo "bash is missing - diagnostics cannot run" >&2
+              exit 1
+            fi
+            if ! bash -n /usr/local/bin/diagnostics; then
+              echo "diagnostics has a syntax error" >&2
+              exit 1
+            fi
+            echo "diagnostics: present and parses OK"
+
             echo "Smoke test passed!"
           '
 
@@ -250,6 +273,8 @@ jobs:
   build-arm64:
     name: Build arm64 image
     runs-on: ubuntu-24.04-arm  # Native arm64 runner - no QEMU emulation needed
+    # Backstop only — see the note on build-amd64.
+    timeout-minutes: 75
     outputs:
       version: ${{ steps.build.outputs.version }}
       trivy_summary: ${{ steps.trivy_summary.outputs.summary }}
@@ -419,6 +444,24 @@ jobs:
             find /usr /opt /var/lib -name "*.jar" -type f 2>/dev/null | head -5 \
               || echo "No JAR files"
 
+            echo "=== Diagnostics tool ==="
+            # Version-robust on purpose: only asserts the tool is shipped and still
+            # parses. Actually running it needs a live systemd, which build.sh
+            # Phase 5 (Check 4/5) covers against the freshly built image.
+            if ! test -x /usr/local/bin/diagnostics; then
+              echo "/usr/local/bin/diagnostics: MISSING or not executable" >&2
+              exit 1
+            fi
+            if ! command -v bash >/dev/null 2>&1; then
+              echo "bash is missing - diagnostics cannot run" >&2
+              exit 1
+            fi
+            if ! bash -n /usr/local/bin/diagnostics; then
+              echo "diagnostics has a syntax error" >&2
+              exit 1
+            fi
+            echo "diagnostics: present and parses OK"
+
             echo "Smoke test passed!"
           '
 
@@ -430,6 +473,8 @@ jobs:
 
   create-manifest:
     name: Create multi-arch manifest
+    # Paginates the Hub tag list; every curl is individually capped at 30s.
+    timeout-minutes: 30
     needs: [build-amd64, build-arm64]
     if: always() && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' && github.event.inputs.push != 'false'
     runs-on: ubuntu-24.04
@@ -461,7 +506,7 @@ jobs:
               '{username: $username, password: $password}'
           )"
 
-          LOGIN_RESPONSE=$(curl -fsSL -X POST \
+          LOGIN_RESPONSE=$(curl -fsSL --connect-timeout 10 --max-time 30 -X POST \
             -H "Content-Type: application/json" \
             -d "${LOGIN_PAYLOAD}" \
             https://hub.docker.com/v2/users/login/)
@@ -490,7 +535,7 @@ jobs:
           PROMOTE_LATEST_INPUT="${INPUT_PROMOTE_LATEST}"
           DEV_IMAGE="${INPUT_DEV_IMAGE:-false}"
           REGISTRY_TOKEN="$(
-            curl -fsSL \
+            curl -fsSL --connect-timeout 10 --max-time 30 \
               "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAME}:pull" \
               | jq -r '.token // empty'
           )"
@@ -511,7 +556,7 @@ jobs:
           fetch_manifest() {
             local ref="$1"
 
-            curl -fsSL \
+            curl -fsSL --connect-timeout 10 --max-time 30 \
               -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
               -H "Accept: ${ACCEPT_HEADER}" \
               "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${ref}"
@@ -524,7 +569,7 @@ jobs:
             # P2.3 fix: distinguish 404 (no latest) from transient errors.
             # curl -f would treat both as failure — use -w '%{http_code}' instead.
             response="$(
-              curl -sS -w '\n%{http_code}' \
+              curl -sS --connect-timeout 10 --max-time 30 -w '\n%{http_code}' \
                 -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
                 -H "Accept: ${ACCEPT_HEADER}" \
                 "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/latest"
@@ -539,7 +584,7 @@ jobs:
               return 1   # Transient error — hard fail in caller, do not promote
             fi
 
-            child_digest="$(jq -r '.manifests[]? | select(.platform.architecture == "amd64") | .digest' <<< "$manifest" | head -n 1)"
+            child_digest="$(jq -r 'first(.manifests[]? | select(.platform.architecture == "amd64") | .digest) // empty' <<< "$manifest")"
             if [[ -z "$child_digest" ]]; then
               child_digest="$(jq -r '.manifests[0]?.digest // empty' <<< "$manifest")"
             fi
@@ -554,7 +599,7 @@ jobs:
             [[ -n "$config_digest" ]] || return 1
 
             config="$(
-              curl -fsSL \
+              curl -fsSL --connect-timeout 10 --max-time 30 \
                 -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
                 "https://registry-1.docker.io/v2/${IMAGE_NAME}/blobs/${config_digest}"
             )"
@@ -688,7 +733,7 @@ jobs:
 
           for ARCH in amd64 arm64; do
             TAG="${VERSION}-${ARCH}"
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+            STATUS=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
               -H "Authorization: Bearer ${HUB_TOKEN}" \
               "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${TAG}/")
             if [[ "${STATUS}" == "200" || "${STATUS}" == "204" ]]; then
@@ -723,7 +768,7 @@ jobs:
           echo "::warning::Manifest job failed — attempting to remove orphaned arch tags for ${VERSION}"
           for ARCH in amd64 arm64; do
             TAG="${VERSION}-${ARCH}"
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+            STATUS=$(curl -s --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
               -H "Authorization: Bearer ${HUB_TOKEN}" \
               "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/${TAG}/")
             echo "DELETE ${TAG}: HTTP ${STATUS}"
@@ -752,7 +797,7 @@ jobs:
           # much higher than anonymous/IP-based limits, critical now that we
           # fetch one manifest per published tag.
           REGISTRY_TOKEN="$(
-            curl -fsSL \
+            curl -fsSL --connect-timeout 10 --max-time 30 \
               -u "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
               "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAME}:pull" \
               | jq -r '.token // empty'
@@ -785,7 +830,7 @@ jobs:
             digests_before="$(wc -l < "${protected}")"
 
             response="$(
-              curl -sSD - \
+              curl -sSD - --connect-timeout 10 --max-time 30 \
                 -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
                 -H "Accept: ${ACCEPT_HEADER}" \
                 -o "${manifest_file}" \
@@ -825,7 +870,7 @@ jobs:
           TAGS_URL="https://hub.docker.com/v2/repositories/${NAMESPACE}/${REPO}/tags?page_size=100"
           while [[ -n "${TAGS_URL}" && "${TAGS_URL}" != "null" ]]; do
             TAGS_PAGE="$(
-              curl -fsSL \
+              curl -fsSL --connect-timeout 10 --max-time 30 \
                 -H "Authorization: Bearer ${HUB_TOKEN}" \
                 "${TAGS_URL}"
             )"
@@ -843,7 +888,7 @@ jobs:
           NEXT="${IMAGES_BASE}?status=inactive&page_size=100"
           while [[ -n "${NEXT}" && "${NEXT}" != "null" ]]; do
             PAGE_WITH_STATUS="$(
-              curl -sS -w '\n%{http_code}' \
+              curl -sS --connect-timeout 10 --max-time 30 -w '\n%{http_code}' \
                 -H "Authorization: Bearer ${HUB_TOKEN}" \
                 "${NEXT}"
             )"
@@ -871,7 +916,7 @@ jobs:
               fi
 
               STATUS="$(
-                curl -sS -o /dev/null -w "%{http_code}" -X DELETE \
+                curl -sS --connect-timeout 10 --max-time 30 -o /dev/null -w "%{http_code}" -X DELETE \
                   -H "Authorization: Bearer ${HUB_TOKEN}" \
                   "${IMAGES_BASE}/${DIGEST}/"
               )"
@@ -893,6 +938,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
+    timeout-minutes: 15
     needs: [build-amd64, build-arm64, create-manifest]
     if: always() && needs.build-amd64.result == 'success' && needs.build-arm64.result == 'success' && needs.create-manifest.result == 'success' && github.event.inputs.push != 'false' && github.event.inputs.dev_image != 'true'
     runs-on: ubuntu-24.04

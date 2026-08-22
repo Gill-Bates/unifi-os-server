@@ -40,12 +40,18 @@ WARN_RAM_MB="${DIAGNOSTICS_WARN_RAM_MB:-3072}"
 SPEC_DISK_MB=10240
 CRIT_DISK_MB="${DIAGNOSTICS_CRIT_DISK_MB:-2048}"
 
+# Upper bound on journal lines pulled into memory. A crash-looping unit can fill
+# the journal faster than this tool can summarise it, and the whole block is held
+# in a shell variable — unbounded, that gets the diagnostics OOM-killed exactly
+# when it is needed. Only the newest 50 are ever displayed anyway.
+JOURNAL_MAX_LINES="${DIAGNOSTICS_JOURNAL_MAX_LINES:-5000}"
+
 # ---------------------------------------------------------------------------
 # Dependency preflight — fail fast if required tools are missing.
 # runuser is needed for PostgreSQL DB checks (section 4).
 # ---------------------------------------------------------------------------
 MISSING_TOOLS=()
-for _tool in systemctl journalctl ss mountpoint df awk grep sed runuser; do
+for _tool in systemctl journalctl ss mountpoint df awk grep sed runuser timeout; do
     command -v "$_tool" >/dev/null 2>&1 || MISSING_TOOLS+=("$_tool")
 done
 if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
@@ -427,7 +433,9 @@ else
     ALL_DBS_OK=1
     for db in "ulp-go" "ulp-go-syslog" "uid" \
               "ucs-agent" "unifi-directory" "unifi-identity-update"; do
-        EXISTS="$(runuser -u postgres -- "${PG_BIN}/psql" -tAc \
+        # timeout: psql blocks forever when PostgreSQL is up but wedged (exhausted
+        # pool, deadlock) — exactly the state this tool is meant to report on.
+        EXISTS="$(timeout 10 runuser -u postgres -- "${PG_BIN}/psql" -tAc \
             "SELECT 1 FROM pg_database WHERE datname='${db}'" 2>/dev/null \
             | tr -d '[:space:]' || echo '')"
         if [ "$EXISTS" = "1" ]; then
@@ -540,7 +548,10 @@ render_table "Bind-Mounts & Volume Paths"
 _CAT="Config"
 
 if [ -f /data/uos_uuid ]; then
-    UUID="$(cat /data/uos_uuid)"
+    # Bounded read: /data is a user-supplied bind mount, and a corrupt or
+    # oversized file there must not be slurped into memory whole. A UUID is 36
+    # characters; 128 leaves room for whitespace without risking anything.
+    UUID="$(head -c 128 /data/uos_uuid 2>/dev/null || true)"
     # The entrypoint generates a random UUID and sets the version nibble to '5'
     # (cosmetic — UniFi only validates the format, not the generation algorithm).
     # Accept version 1-5 to stay valid if Ubiquiti changes the generator upstream.
@@ -589,6 +600,7 @@ if ! systemctl is-active --quiet systemd-journald 2>/dev/null; then
     WARNINGS=$((WARNINGS+1))
 else
     SYS_ERRORS="$(journalctl --since "15 minutes ago" -p err..emerg \
+        -n "$JOURNAL_MAX_LINES" \
         --no-pager --output=short-iso 2>/dev/null \
         | grep -v '^-- ' \
         | grep -v 'systemd-gpt-auto-generator' \
@@ -614,9 +626,16 @@ else
         printf '%s\n' "$SYS_ERRORS" | head -50 | while IFS= read -r line; do
             printf "  %s   │ %s%s\n" "$DIM" "$line" "$R"
         done
-        [ "$SYS_ERROR_COUNT" -gt 50 ] && printf \
-            "\n  %s   … %d total. Full view: journalctl -p err --since '15 min ago' --no-pager%s\n" \
-            "$GRAY" "$SYS_ERROR_COUNT" "$R"
+        if [ "$SYS_ERROR_COUNT" -ge "$JOURNAL_MAX_LINES" ]; then
+            # Reading was capped, so the true total is unknown — do not claim one.
+            printf \
+                "\n  %s   … at least %d (journal read capped at %d lines). Full view: journalctl -p err --since '15 min ago' --no-pager%s\n" \
+                "$GRAY" "$SYS_ERROR_COUNT" "$JOURNAL_MAX_LINES" "$R"
+        elif [ "$SYS_ERROR_COUNT" -gt 50 ]; then
+            printf \
+                "\n  %s   … %d total. Full view: journalctl -p err --since '15 min ago' --no-pager%s\n" \
+                "$GRAY" "$SYS_ERROR_COUNT" "$R"
+        fi
 
         printf '\n'
         # Crash-loop: F4 fix — extract unit via awk, not grep -P
@@ -626,7 +645,10 @@ else
                 | awk '{u=$3; sub(/\[[0-9]+\]:?$/,"",u); sub(/:$/,"",u); print u}' \
                 | sort -u || true)"
             for ls in $LOOP_SVCS; do
-                LOOP_N="$(printf '%s\n' "$SYS_ERRORS" | grep "$ls" \
+                # -F: $ls is a unit name parsed out of arbitrary log text. As a
+                # regex its dots match any character (false positives) and a stray
+                # bracket makes grep fail outright. It is wanted as literal text.
+                LOOP_N="$(printf '%s\n' "$SYS_ERRORS" | grep -F "$ls" \
                     | grep -oE 'restart counter is at [0-9]+' \
                     | grep -oE '[0-9]+' | tail -1 || true)"
                 # F7: tail exits 0 on empty input so || echo '?' never fires;

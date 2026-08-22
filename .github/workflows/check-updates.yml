@@ -31,6 +31,7 @@ jobs:
   check-version:
     name: Check for new version
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       new_version_available: ${{ steps.check.outputs.new_version_available }}
       api_available: ${{ steps.check.outputs.api_available }}
@@ -262,6 +263,7 @@ jobs:
   trigger-build:
     name: Trigger build for new version
     needs: check-version
+    timeout-minutes: 10
     if: needs.check-version.outputs.new_version_available == 'true'
     runs-on: ubuntu-24.04
     permissions:

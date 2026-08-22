@@ -98,7 +98,13 @@ PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 PUSH="${PUSH:-true}"
 VERSION="${VERSION:-}"
 PROMOTE_LATEST="${PROMOTE_LATEST:-auto}"
-BUILD_ARTIFACTS_DIR="${BUILD_ARTIFACTS_DIR:-/tmp/uos-build-$$}"
+# Left empty when unset: the directory is minted lazily by ensure_artifacts_dir()
+# via mktemp so the name is unpredictable (CWE-377). A PID-based name in the
+# world-writable /tmp can be pre-created by another local user as a symlink,
+# and `mkdir -p` happily follows it — writing build artifacts, as root, into
+# whatever it points at. Deferring creation also keeps `--help` from leaving
+# stray directories behind.
+BUILD_ARTIFACTS_DIR="${BUILD_ARTIFACTS_DIR:-}"
 DOWNLOAD_API_URL="${DOWNLOAD_API_URL:-https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server}"
 PRESERVE_FAILURE_CONTAINERS="${PRESERVE_FAILURE_CONTAINERS:-true}"
 PINNED_BUILD_INPUT=false
@@ -163,6 +169,25 @@ fatal() {
 }
 
 #######################################
+# ARTIFACT DIRECTORY
+#######################################
+
+# Resolve BUILD_ARTIFACTS_DIR on first use and make sure it exists.
+# An unset value is minted with mktemp -d (mode 0700, unpredictable name) so a
+# local attacker cannot pre-create the path as a symlink and redirect our writes.
+# The /tmp/uos-build-* prefix is kept deliberately: the CI failure-artifact upload
+# globs on it (.github/workflows/docker-build.yml). An explicitly provided
+# BUILD_ARTIFACTS_DIR is the caller's responsibility and is used as-is.
+ensure_artifacts_dir() {
+    if [[ -z "$BUILD_ARTIFACTS_DIR" ]]; then
+        BUILD_ARTIFACTS_DIR="$(mktemp -d /tmp/uos-build-XXXXXXXX)" \
+            || fatal "Could not create a temporary artifacts directory under /tmp"
+    fi
+
+    mkdir -p "$BUILD_ARTIFACTS_DIR" || fatal "Could not create artifacts directory: $BUILD_ARTIFACTS_DIR"
+}
+
+#######################################
 # CONTAINER STATE MODEL
 #######################################
 
@@ -179,7 +204,7 @@ fatal() {
 get_container_state() {
     local container_name="$1"
     local state
-    state=$(docker inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null) || {
+    state=$(timeout 15 docker inspect --format '{{.State.Status}}' "$container_name" 2>/dev/null) || {
         printf 'missing\n'
         return
     }
@@ -188,32 +213,34 @@ get_container_state() {
 
 get_container_exit_code() {
     local container_name="$1"
-    docker inspect --format '{{.State.ExitCode}}' "$container_name" 2>/dev/null || printf '255\n'
+    timeout 15 docker inspect --format '{{.State.ExitCode}}' "$container_name" 2>/dev/null || printf '255\n'
 }
 
 get_container_oom_killed() {
     local container_name="$1"
-    docker inspect --format '{{.State.OOMKilled}}' "$container_name" 2>/dev/null || printf 'false\n'
+    timeout 15 docker inspect --format '{{.State.OOMKilled}}' "$container_name" 2>/dev/null || printf 'false\n'
 }
 
 get_container_error() {
     local container_name="$1"
-    docker inspect --format '{{.State.Error}}' "$container_name" 2>/dev/null || printf '\n'
+    timeout 15 docker inspect --format '{{.State.Error}}' "$container_name" 2>/dev/null || printf '\n'
 }
 
 get_container_started_at() {
     local container_name="$1"
-    docker inspect --format '{{.State.StartedAt}}' "$container_name" 2>/dev/null || printf '\n'
+    timeout 15 docker inspect --format '{{.State.StartedAt}}' "$container_name" 2>/dev/null || printf '\n'
 }
 
 get_container_finished_at() {
     local container_name="$1"
-    docker inspect --format '{{.State.FinishedAt}}' "$container_name" 2>/dev/null || printf '\n'
+    timeout 15 docker inspect --format '{{.State.FinishedAt}}' "$container_name" 2>/dev/null || printf '\n'
 }
 
 container_exists() {
     local container_name="$1"
-    docker inspect "$container_name" >/dev/null 2>&1
+    # Bounded like every other docker call reachable from the cleanup trap:
+    # a hung daemon must not be able to stall termination indefinitely.
+    timeout 15 docker inspect "$container_name" >/dev/null 2>&1
 }
 
 # Format container state as plain text to stdout.
@@ -267,7 +294,7 @@ preserve_failure() {
     local phase="$3"
     local reason="$4"
 
-    mkdir -p "$BUILD_ARTIFACTS_DIR"
+    ensure_artifacts_dir
     local timestamp
     timestamp=$(date -u +%Y%m%d-%H%M%S)
     local prefix="${BUILD_ARTIFACTS_DIR}/failure-${arch}-${phase}-${timestamp}"
@@ -299,11 +326,11 @@ preserve_failure() {
 
     # Save full inspect
     diag "Saving docker inspect..."
-    docker inspect "$container_name" > "${prefix}-inspect.json" 2>&1 || true
+    timeout 20 docker inspect "$container_name" > "${prefix}-inspect.json" 2>&1 || true
 
     # Save logs (full, not truncated)
     diag "Saving container logs..."
-    docker logs "$container_name" > "${prefix}-stdout.log" 2> "${prefix}-stderr.log" || true
+    timeout 30 docker logs "$container_name" > "${prefix}-stdout.log" 2> "${prefix}-stderr.log" || true
 
     # If both logs are empty, the container likely crashed before producing output.
     # Check the bind-mounted extract.log first — it's written before docker logging
@@ -338,7 +365,7 @@ preserve_failure() {
             echo "Finished at: $(get_container_finished_at "$container_name")"
             echo ""
             echo "=== Container state (JSON) ==="
-            docker inspect --format '{{json .State}}' "$container_name" 2>/dev/null | jq . 2>/dev/null || true
+            timeout 20 docker inspect --format '{{json .State}}' "$container_name" 2>/dev/null | jq . 2>/dev/null || true
         } > "${prefix}-crash-diagnostic.txt"
     fi
 
@@ -361,9 +388,9 @@ preserve_failure() {
     # Try to get inner podman state if possible
     if [[ "$state" == "running" ]]; then
         diag "Capturing inner podman state..."
-        docker exec "$container_name" podman ps -a > "${prefix}-podman-ps.txt" 2>&1 || true
-        docker exec "$container_name" podman images > "${prefix}-podman-images.txt" 2>&1 || true
-        docker exec "$container_name" podman logs uosserver > "${prefix}-podman-uosserver.log" 2>&1 || true
+        timeout 30 docker exec "$container_name" podman ps -a > "${prefix}-podman-ps.txt" 2>&1 || true
+        timeout 30 docker exec "$container_name" podman images > "${prefix}-podman-images.txt" 2>&1 || true
+        timeout 30 docker exec "$container_name" podman logs uosserver > "${prefix}-podman-uosserver.log" 2>&1 || true
     fi
 
     warn "Failure artifacts saved to: ${prefix}*"
@@ -396,8 +423,13 @@ cleanup() {
         log "Cleaning up ${#cleanup_containers[@]} container(s)..."
         for container_name in "${cleanup_containers[@]}"; do
             [[ -n "$container_name" ]] || continue
+            # Bounded: this runs from the EXIT/ERR trap, so an unresponsive docker
+            # daemon or a container stuck in uninterruptible I/O would otherwise
+            # block the script from ever terminating and hold the CI runner open.
+            # A leaked container is far cheaper than a wedged pipeline.
             if container_exists "$container_name"; then
-                docker rm -f "$container_name" >/dev/null 2>&1 || true
+                timeout 30 docker rm -f "$container_name" >/dev/null 2>&1 \
+                    || warn "  Could not remove container within 30s: $container_name"
             fi
         done
     fi
@@ -536,7 +568,7 @@ fetch_current_latest_version() {
             "$accept_header"
     )" || return $?
 
-    child_digest="$(jq -r '.manifests[]? | select(.platform.architecture == "amd64") | .digest' <<< "$manifest" | head -n 1)"
+    child_digest="$(jq -r 'first(.manifests[]? | select(.platform.architecture == "amd64") | .digest) // empty' <<< "$manifest")"
     if [[ -z "$child_digest" ]]; then
         child_digest="$(jq -r '.manifests[0]?.digest // empty' <<< "$manifest")"
     fi
@@ -880,14 +912,16 @@ run_extraction() {
     # Monitor container state
     local timeout_seconds=1800  # 30 minutes max
     local poll_interval=5
-    local elapsed=0
+    local mon_started=$SECONDS
+    local mon_deadline=$(( SECONDS + timeout_seconds ))
+    local next_progress=$(( SECONDS + 30 ))
     local last_log_lines=""
     local current_state=""
     local success=false
 
     log "Monitoring extraction (timeout: ${timeout_seconds}s)..."
 
-    while (( elapsed < timeout_seconds )); do
+    while (( SECONDS < mon_deadline )); do
         current_state=$(get_container_state "$container_name")
 
         case "$current_state" in
@@ -898,12 +932,13 @@ run_extraction() {
                     current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
                     
                     # Wait for file to stop growing (handles repair/repack phase).
-                    # Count the sleeps toward elapsed to avoid timeout drift.
-                    sleep 3; elapsed=$((elapsed + 3))
+                    # No manual clock bookkeeping needed: the loop deadline is
+                    # measured against $SECONDS, so these sleeps count themselves.
+                    sleep 3
                     prev_size=$current_size
                     current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
                     
-                    sleep 3; elapsed=$((elapsed + 3))
+                    sleep 3
                     prev_size2=$current_size
                     current_size=$(stat -c%s "${output_dir}/uosserver.tar" 2>/dev/null || echo "0")
                     
@@ -923,12 +958,15 @@ run_extraction() {
                     fi
                 fi
 
-                # Show progress every 30 seconds
-                if (( elapsed % 30 == 0 )); then
+                # Show progress every 30 seconds. Driven by a deadline rather
+                # than `elapsed % 30`: wall-clock time advances in uneven steps,
+                # so a modulo test would skip most of its trigger points.
+                if (( SECONDS >= next_progress )); then
+                    next_progress=$(( SECONDS + 30 ))
                     local new_logs
-                    new_logs=$(docker logs --tail 5 "$container_name" 2>&1 || true)
+                    new_logs=$(timeout 15 docker logs --tail 5 "$container_name" 2>&1 || true)
                     if [[ "$new_logs" != "$last_log_lines" ]]; then
-                        diag "Progress (${elapsed}s): $(echo "$new_logs" | tail -1 | head -c 200)"
+                        diag "Progress ($(( SECONDS - mon_started ))s): $(echo "$new_logs" | tail -1 | head -c 200)"
                         last_log_lines="$new_logs"
                     fi
                 fi
@@ -960,7 +998,7 @@ run_extraction() {
                         # Dump container logs directly to stderr for immediate CI visibility
                         # (preserve_failure saves them to files, but CI output is checked first)
                         warn "--- Container output (last 50 lines) ---"
-                        docker logs --tail 50 "$container_name" >&2 2>&1 || true
+                        timeout 15 docker logs --tail 50 "$container_name" >&2 2>&1 || true
                         warn "--- End container output ---"
                         preserve_failure "$container_name" "$arch" "extraction" "Exited with code $exit_code, no artifact"
                         fatal "Extraction failed: container exited with code $exit_code and no uosserver.tar"
@@ -988,7 +1026,6 @@ run_extraction() {
         esac
 
         sleep "$poll_interval"
-        elapsed=$((elapsed + poll_interval))
     done
 
     # Timeout check
@@ -998,7 +1035,7 @@ run_extraction() {
         preserve_failure "$container_name" "$arch" "extraction" "Timeout after ${timeout_seconds}s"
         
         # Stop the container for cleanup
-        docker stop -t 10 "$container_name" >/dev/null 2>&1 || true
+        timeout 30 docker stop -t 10 "$container_name" >/dev/null 2>&1 || true
         fatal "Extraction failed: timeout"
     fi
 
@@ -1026,7 +1063,7 @@ run_extraction() {
 
     # Cleanup container and remove from cleanup array
     # (Container no longer needed for failure analysis)
-    docker rm -f "$container_name" >/dev/null 2>&1 || true
+    timeout 30 docker rm -f "$container_name" >/dev/null 2>&1 || true
     remove_from_cleanup "$container_name"
 
     printf -v "$__out" '%s' "${output_dir}/uosserver.tar"
@@ -1188,6 +1225,28 @@ tag_local_aliases() {
 # PHASE 5: VALIDATE RUNTIME IMAGE
 #######################################
 
+# Probe one critical service inside the validation container.
+# Defined at top level so it is not re-declared on every polling iteration.
+# The postgresql@* glob resolves to whichever major version is installed
+# (PG 14 → 15/16); the resolved unit name is echoed so the caller can log it.
+probe_critical_service() {
+    local container_name="$1"
+    local svc="$2"
+    local unit
+
+    if [[ "$svc" == "postgresql@*" ]]; then
+        unit=$(timeout 15 docker exec "$container_name" \
+            systemctl list-units --type=service --state=active --no-legend 'postgresql@*' \
+            2>/dev/null | awk '{print $1; exit}' || true)
+        [[ -n "$unit" ]] || return 1
+        printf '%s\n' "$unit"
+        return 0
+    fi
+
+    timeout 15 docker exec "$container_name" systemctl is-active "$svc" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$svc"
+}
+
 validate_runtime_image() {
     local arch="$1"
     local image_tag="$2"
@@ -1237,14 +1296,20 @@ validate_runtime_image() {
     # 30s cap. This polls aggressively early (when systemd reaches 'running'
     # fastest) and backs off if the boot is slow (JVM start, first-boot DB init).
     # Hard ceiling: 300s (5 min) — enough for the heaviest first-boot scenario.
-    log "Check 1/4: Waiting for systemd..."
+    #
+    # The ceiling is measured against $SECONDS (true wall clock), not against the
+    # sum of the sleeps: every iteration also spends up to 10s inside `timeout 10
+    # docker exec`, so accumulating only the sleep intervals would let a nominal
+    # 300s budget quietly run ~430s when the container is unresponsive.
+    log "Check 1/5: Waiting for systemd..."
     local systemd_timeout=300
-    local elapsed=0
+    local systemd_started=$SECONDS
+    local systemd_deadline=$(( SECONDS + systemd_timeout ))
     local sleep_interval=2
     local sleep_max=30
     local systemd_state=""
 
-    while (( elapsed < systemd_timeout )); do
+    while (( SECONDS < systemd_deadline )); do
         # systemctl is-system-running exits non-zero for any state other than
         # "running" (e.g. "starting" = exit 1, "degraded" = exit 1).
         # Using || echo "unknown" would silently replace the real state with
@@ -1257,7 +1322,7 @@ validate_runtime_image() {
 
         case "$systemd_state" in
             running|degraded)
-                log "  systemd ready: $systemd_state (${elapsed}s)"
+                log "  systemd ready: $systemd_state ($(( SECONDS - systemd_started ))s)"
                 break
                 ;;
             starting|initializing)
@@ -1274,7 +1339,6 @@ validate_runtime_image() {
         esac
 
         sleep "$sleep_interval"
-        elapsed=$(( elapsed + sleep_interval ))
         # Double the interval, cap at sleep_max
         sleep_interval=$(( sleep_interval * 2 ))
         (( sleep_interval > sleep_max )) && sleep_interval=$sleep_max
@@ -1288,33 +1352,45 @@ validate_runtime_image() {
     # --- Check 2: Verify critical services ---
     # These services are expected in a healthy UniFi OS installation.
     # postgresql is matched by glob to survive a major-version bump (PG 14 → 15/16).
-    log "Check 2/4: Verifying critical services..."
-    local services_ok=true
+    #
+    # Poll with exponential backoff rather than probing once. unifi-core starts a
+    # JVM and waits for DB migrations, so it routinely lags behind the rest of the
+    # boot — the very lag Check 3 below already tolerates for its ports 8443/8080.
+    # A single immediate probe here fails the build whenever Check 1 times out with
+    # systemd still in 'starting' (which is itself usually *caused* by unifi-core
+    # not having settled yet), even though the service comes up moments later.
+    log "Check 2/5: Verifying critical services..."
+    local service_timeout=180
+    local -a pending_services=("unifi-core" "nginx" "mongodb" "postgresql@*")
+    local s_started=$SECONDS
+    local s_elapsed=0
+    local s_interval=2
+    local resolved_unit
 
-    # Fixed services
-    local critical_services=("unifi-core" "nginx" "mongodb")
-    for svc in "${critical_services[@]}"; do
-        if docker exec "$container_name" systemctl is-active "$svc" >/dev/null 2>&1; then
-            log "  ✓ $svc is active"
-        else
-            warn "  ✗ $svc is not active"
-            services_ok=false
-        fi
+    while true; do
+        s_elapsed=$(( SECONDS - s_started ))
+        local -a still_pending=()
+        for svc in "${pending_services[@]}"; do
+            if resolved_unit=$(probe_critical_service "$container_name" "$svc"); then
+                log "  ✓ $resolved_unit is active (${s_elapsed}s)"
+            else
+                still_pending+=("$svc")
+            fi
+        done
+        pending_services=("${still_pending[@]}")
+
+        (( ${#pending_services[@]} == 0 )) && break
+        (( SECONDS - s_started >= service_timeout )) && break
+
+        sleep "$s_interval"
+        s_interval=$(( s_interval * 2 ))
+        (( s_interval > 30 )) && s_interval=30
     done
 
-    # PostgreSQL: match whichever major version is installed
-    local pg_unit
-    pg_unit=$(docker exec "$container_name" \
-        systemctl list-units --type=service --state=active --no-legend 'postgresql@*' \
-        2>/dev/null | awk '{print $1; exit}' || true)
-    if [[ -n "$pg_unit" ]]; then
-        log "  ✓ $pg_unit is active"
-    else
-        warn "  ✗ no active postgresql@* service found"
-        services_ok=false
-    fi
-
-    if [[ "$services_ok" != "true" ]]; then
+    if (( ${#pending_services[@]} > 0 )); then
+        for svc in "${pending_services[@]}"; do
+            warn "  ✗ $svc is not active (after ${service_timeout}s)"
+        done
         preserve_failure "$container_name" "$arch" "validation" "Critical service check failed"
         fatal "Validation failed: one or more critical services are inactive"
     fi
@@ -1324,23 +1400,23 @@ validate_runtime_image() {
     # on first boot while the JVM initialises and waits for DB migrations.
     # Poll each port independently with exponential backoff so a fast start
     # (e.g. warm volume) exits quickly, while a slow start gets enough time.
-    log "Check 3/4: Verifying listening ports..."
+    log "Check 3/5: Verifying listening ports..."
     local expected_ports=("443" "8443" "8080" "27017")
     local ports_ok=true
     local port_timeout=180  # per-port ceiling
 
     for port in "${expected_ports[@]}"; do
-        local p_elapsed=0
+        local p_started=$SECONDS
+        local p_deadline=$(( SECONDS + port_timeout ))
         local p_interval=2
         local p_ready=false
-        while (( p_elapsed < port_timeout )); do
-            if docker exec "$container_name" ss -tlnp 2>/dev/null | grep -q ":${port} "; then
-                log "  ✓ Port $port is listening (${p_elapsed}s)"
+        while (( SECONDS < p_deadline )); do
+            if timeout 15 docker exec "$container_name" ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+                log "  ✓ Port $port is listening ($(( SECONDS - p_started ))s)"
                 p_ready=true
                 break
             fi
             sleep "$p_interval"
-            p_elapsed=$(( p_elapsed + p_interval ))
             p_interval=$(( p_interval * 2 ))
             (( p_interval > 30 )) && p_interval=30
         done
@@ -1355,10 +1431,56 @@ validate_runtime_image() {
         fatal "Validation failed: one or more expected ports are not listening"
     fi
 
-    # --- Check 4: Restart test ---
+    # --- Check 4: Diagnostics tool ---
+    # `diagnostics` ships inside the image and is the first thing the README tells
+    # users to run, but it hardcodes assumptions about the UniFi OS layout: unit
+    # names, /usr/lib/postgresql/<major>/bin, the required-mount list, and a
+    # preflight that exits 2 when a tool it needs (runuser, ss, journalctl, …) is
+    # absent from the base image. An upstream version bump can invalidate any of
+    # those, so exercise the tool here instead of learning about it from a bug report.
+    #
+    # Deliberately version-agnostic — this must not need editing per UniFi release.
+    # We assert only what is true of *every* healthy release:
+    #   * the tool exists and runs to completion (summary banner reached)
+    #   * its preflight finds every tool it needs (exit != 2)
+    #   * it terminates normally (exit 0 or 1, not a crash/timeout)
+    # We deliberately do NOT assert the failure/warning counts, the PostgreSQL
+    # major version, the database list or any specific path: those legitimately
+    # vary between releases and in a throwaway validation container without bind
+    # mounts. Pinning them would mean re-editing this check for every release,
+    # which is exactly what it exists to avoid.
+    log "Check 4/5: Diagnostics tool..."
+    local diag_output=""
+    local diag_rc=0
+
+    diag_output=$(timeout 120 docker exec "$container_name" diagnostics 2>&1) || diag_rc=$?
+
+    if (( diag_rc == 2 )); then
+        printf '%s\n' "$diag_output" >&2
+        preserve_failure "$container_name" "$arch" "validation" "diagnostics preflight failed: missing tools"
+        fatal "Validation failed: diagnostics is missing required tools in this image"
+    fi
+
+    if (( diag_rc != 0 && diag_rc != 1 )); then
+        printf '%s\n' "$diag_output" >&2
+        preserve_failure "$container_name" "$arch" "validation" "diagnostics exited with $diag_rc"
+        fatal "Validation failed: diagnostics did not run cleanly (exit $diag_rc)"
+    fi
+
+    # Reaching the summary banner proves the script ran end-to-end rather than
+    # dying midway (unbound variable under set -u, syntax error, a hung probe).
+    if ! grep -qE 'Failures[[:space:]]*:' <<<"$diag_output"; then
+        printf '%s\n' "$diag_output" >&2
+        preserve_failure "$container_name" "$arch" "validation" "diagnostics did not reach its summary"
+        fatal "Validation failed: diagnostics did not complete (no summary section)"
+    fi
+
+    log "  ✓ diagnostics ran end-to-end (exit ${diag_rc})"
+
+    # --- Check 5: Restart test ---
     # Verify container survives a stop/start cycle (proves persistent state)
-    log "Check 4/4: Restart test..."
-    if ! docker stop -t 30 "$container_name" >/dev/null 2>&1; then
+    log "Check 5/5: Restart test..."
+    if ! timeout 60 docker stop -t 30 "$container_name" >/dev/null 2>&1; then
         preserve_failure "$container_name" "$arch" "validation" "docker stop failed during restart test"
         fatal "Validation failed: could not stop container for restart test"
     fi
@@ -1380,11 +1502,11 @@ validate_runtime_image() {
     # complex systemd appliance containers can need a long recovery window after
     # docker stop/start, while the initial boot/service/port validation above is
     # the authoritative image health check.
-    elapsed=0
     local restart_timeout=180
+    local restart_deadline=$(( SECONDS + restart_timeout ))
     systemd_state="unknown"
 
-    while (( elapsed < restart_timeout )); do
+    while (( SECONDS < restart_deadline )); do
         state=$(get_container_state "$container_name")
         if [[ "$state" != "running" ]]; then
             error "  Container exited after restart"
@@ -1401,7 +1523,6 @@ validate_runtime_image() {
         fi
 
         sleep 2
-        elapsed=$((elapsed + 2))
     done
 
     if [[ "$systemd_state" != "running" && "$systemd_state" != "degraded" ]]; then
@@ -1425,8 +1546,8 @@ validate_runtime_image() {
     fi
 
     # Cleanup validation container
-    docker stop -t 10 "$container_name" >/dev/null 2>&1 || true
-    docker rm -f "$container_name" >/dev/null 2>&1 || true
+    timeout 30 docker stop -t 10 "$container_name" >/dev/null 2>&1 || true
+    timeout 30 docker rm -f "$container_name" >/dev/null 2>&1 || true
     remove_from_cleanup "$container_name"
 
     log "Validation complete (result: $validation_state)"
@@ -1446,12 +1567,19 @@ write_build_provenance() {
     local image_tag="$3"
     local validation_result="$4"
 
-    mkdir -p "$BUILD_ARTIFACTS_DIR"
+    ensure_artifacts_dir
     local provenance_file="${BUILD_ARTIFACTS_DIR}/provenance-${VERSION}-${arch}.json"
 
-    # Get image digest
+    # Get image digest.
+    # Guard the array in the template instead of relying on the `||` fallback:
+    # a never-pushed image has an empty .RepoDigests, and `index` on it aborts
+    # template execution *after* docker already emitted a newline to stdout.
+    # The fallback then appends to that newline, yielding "\nlocal-only" — which
+    # jq faithfully records in the provenance file as a bogus digest value.
     local image_digest
-    image_digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$image_tag" 2>/dev/null || echo "local-only")
+    image_digest=$(docker image inspect \
+        --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}local-only{{end}}' \
+        "$image_tag" 2>/dev/null || echo "local-only")
 
     # Get image size
     local image_size
@@ -1646,9 +1774,12 @@ main() {
     require_cmd sed
     require_cmd jq
     require_cmd timeout
+    require_cmd mktemp
 
     load_config
     validate_requested_platforms
+    # Resolve the artifacts path before the banner prints it.
+    ensure_artifacts_dir
 
     log "╔══════════════════════════════════════════════════════════════╗"
     log "║  UniFi OS Server Build"
@@ -1707,7 +1838,7 @@ Environment variables:
     PROMOTE_LATEST             Promote latest tag: auto, true, false (default: auto)
     SKIP_VALIDATION            Skip runtime validation (default: false)
     ALLOW_DEGRADED_PUBLISH     Push image even when validation result is degraded (default: false)
-    BUILD_ARTIFACTS_DIR        Directory for artifacts (default: /tmp/uos-build-PID)
+    BUILD_ARTIFACTS_DIR        Directory for artifacts (default: a fresh mktemp dir under /tmp/uos-build-*)
     BUILD_DATE                 ISO8601 timestamp for reproducible builds (default: current git commit time, else current time)
     PRESERVE_FAILURE_CONTAINERS  Keep containers on failure for debugging (default: true)
     EXPORT_FAILURE_FILESYSTEM  Export container filesystem on failure (default: false, can be multi-GB)

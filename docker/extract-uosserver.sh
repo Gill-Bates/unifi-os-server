@@ -16,6 +16,7 @@ set -euo pipefail
 INSTALLER_PATH="/opt/uos/installer/uos-installer"
 MIN_EXPORT_SIZE_MB=500
 TEMP_EXTRACT=""
+OUTPUT_TAR_TMP=""
 
 log() {
     printf '[extract] %s\n' "$*"
@@ -27,8 +28,23 @@ error() {
 }
 
 cleanup() {
+    # The installer runs in the background and is only stopped explicitly on the
+    # success path. This script is the container's CMD (PID 1), so a stray child
+    # dies with the container anyway — but on any early exit (download failure,
+    # storage timeout, set -e) it would otherwise keep churning disk I/O until
+    # teardown catches up, and the script would not be safe to run outside a
+    # container. Stop it deterministically instead.
+    if [[ -n "${INSTALLER_PID:-}" ]] && kill -0 "$INSTALLER_PID" 2>/dev/null; then
+        kill -TERM "$INSTALLER_PID" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$INSTALLER_PID" 2>/dev/null || true
+    fi
     if [[ -n "$TEMP_EXTRACT" && -d "$TEMP_EXTRACT" ]]; then
         rm -rf "$TEMP_EXTRACT"
+    fi
+    # Never leave a half-written archive behind under the published name.
+    if [[ -n "${OUTPUT_TAR_TMP:-}" && -f "$OUTPUT_TAR_TMP" ]]; then
+        rm -f "$OUTPUT_TAR_TMP"
     fi
 }
 
@@ -227,25 +243,32 @@ sleep 3
 IMAGE_SIZE=$(podman --root "$STORAGE_BASE" images --format "{{.Size}}" "$IMAGE_NAME" 2>/dev/null || echo "unknown")
 log "Image size: $IMAGE_SIZE"
 
-OUTPUT_TAR="${OUTPUT_DIR}/uosserver.tar"
+FINAL_TAR="${OUTPUT_DIR}/uosserver.tar"
+# Publish atomically. Everything below writes, size-checks and (if needed) repairs
+# the archive under a .tmp name in the same directory; a single same-filesystem
+# rename at the very end makes it visible under the published name. The build
+# monitor polls for that name, so it can never catch a truncated or mid-repair
+# archive — and a crashed run leaves no misleading uosserver.tar behind.
+OUTPUT_TAR_TMP="${FINAL_TAR}.tmp"
+OUTPUT_TAR="$OUTPUT_TAR_TMP"
 OCI_TAR="${OUTPUT_DIR}/uosserver-oci.tar"
-log "Exporting image to $OUTPUT_TAR (this may take a while)..."
+log "Exporting image to $FINAL_TAR (this may take a while)..."
 
 log "Saving image as OCI format first..."
-if podman --root "$STORAGE_BASE" save --format oci-archive -o "$OCI_TAR" "$IMAGE_NAME"; then
+if timeout 900 podman --root "$STORAGE_BASE" save --format oci-archive -o "$OCI_TAR" "$IMAGE_NAME"; then
     log "OCI archive created, converting to docker-archive with skopeo..."
     SIMPLE_IMAGE_NAME="uosserver:extracted"
-    if skopeo copy "oci-archive:$OCI_TAR" "docker-archive:$OUTPUT_TAR:$SIMPLE_IMAGE_NAME"; then
+    if timeout 900 skopeo copy "oci-archive:$OCI_TAR" "docker-archive:$OUTPUT_TAR:$SIMPLE_IMAGE_NAME"; then
         log "skopeo conversion succeeded"
         rm -f "$OCI_TAR"
     else
         log "skopeo conversion failed, falling back to podman save"
         rm -f "$OCI_TAR"
-        podman --root "$STORAGE_BASE" save --format docker-archive -o "$OUTPUT_TAR" "$IMAGE_NAME"
+        timeout 900 podman --root "$STORAGE_BASE" save --format docker-archive -o "$OUTPUT_TAR" "$IMAGE_NAME"
     fi
 else
     log "OCI save failed, trying direct docker-archive..."
-    podman --root "$STORAGE_BASE" save --format docker-archive -o "$OUTPUT_TAR" "$IMAGE_NAME"
+    timeout 900 podman --root "$STORAGE_BASE" save --format docker-archive -o "$OUTPUT_TAR" "$IMAGE_NAME"
 fi
 
 TAR_SIZE=$(stat -c%s "$OUTPUT_TAR" 2>/dev/null || echo "0")
@@ -271,7 +294,7 @@ if ! tar -tf "$OUTPUT_TAR" 2>/dev/null | grep -q '^repositories$'; then
     TEMP_EXTRACT=$(mktemp -d)
 
     log "Extracting archive for repair (this may take a minute on arm64)..."
-    if ! tar -xf "$OUTPUT_TAR" -C "$TEMP_EXTRACT"; then
+    if ! timeout 600 tar -xf "$OUTPUT_TAR" -C "$TEMP_EXTRACT"; then
         log "ERROR: Failed to extract archive for repair"
         rm -rf "$TEMP_EXTRACT"
         TEMP_EXTRACT=""
@@ -296,7 +319,7 @@ if ! tar -tf "$OUTPUT_TAR" 2>/dev/null | grep -q '^repositories$'; then
 
                 REPACKED_TAR="${OUTPUT_TAR}.repacked"
                 log "Repacking archive (this may take a minute on arm64)..."
-                if tar -cf "$REPACKED_TAR" -C "$TEMP_EXTRACT" .; then
+                if timeout 600 tar -cf "$REPACKED_TAR" -C "$TEMP_EXTRACT" .; then
                     sync
                     mv -f "$REPACKED_TAR" "$OUTPUT_TAR"
                     sync
@@ -322,6 +345,13 @@ fi
 
 log "Final archive verification:"
 tar -tf "$OUTPUT_TAR" 2>/dev/null | grep -E '^(manifest\.json|repositories|[a-f0-9]+\.json|[a-f0-9]+/layer\.tar)' | head -10 || true
+
+# Everything above validated the staged archive — publish it under the name the
+# build monitor watches. Same directory, so this is a rename, not a copy.
+sync
+mv -f "$OUTPUT_TAR" "$FINAL_TAR"
+OUTPUT_TAR="$FINAL_TAR"
+OUTPUT_TAR_TMP=""
 
 echo "$IMAGE_NAME" > "${OUTPUT_DIR}/image-tag.txt"
 

@@ -9,7 +9,10 @@ set -Eeuo pipefail
 
 # ERR trap: print file, line, and failing command to stderr before exiting.
 # -E (errtrace) ensures this fires inside functions and subshells too.
-trap 'printf "[entrypoint] ERROR at %s:%s — command: %s\n" "${BASH_SOURCE[0]}" "$LINENO" "$BASH_COMMAND" >&2' ERR
+# ${BASH_SOURCE[0]:-} guards the trap itself: when the script is fed to bash via
+# stdin or -c, BASH_SOURCE is empty and set -u would abort *inside* the handler,
+# swallowing the very error it was meant to report.
+trap 'printf "[entrypoint] ERROR at %s:%s — command: %s\n" "${BASH_SOURCE[0]:-unknown}" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 # -----------------------------------------------------------------------------
 # Colors & Formatting
@@ -514,11 +517,24 @@ if [ -n "${UOS_SYSTEM_IP:-}" ]; then
         printf 'system_ip=%s\n' "$UOS_SYSTEM_IP" > "$UNIFI_SYSTEM_PROPERTIES"
     else
         if grep -q "^system_ip=.*" "$UNIFI_SYSTEM_PROPERTIES"; then
-            # Use sed -i (in-place) to preserve the file's existing owner and
-            # mode. A mktemp + install approach resets ownership to root:root,
-            # which breaks re-adoption if the unifi service writes this file as
-            # a non-root user.
-            sed -i "s|^system_ip=.*|system_ip=${UOS_SYSTEM_IP}|" "$UNIFI_SYSTEM_PROPERTIES"
+            # Rewrite through the existing file handle rather than with `sed -i`.
+            # Both preserve the file's owner and mode (a mktemp + install approach
+            # would reset them to root:root and break re-adoption when the unifi
+            # service owns this file), but sed -i finishes with rename(), which
+            # fails outright with EBUSY when an operator bind-mounts this single
+            # file instead of its directory — and under `set -e` that aborts the
+            # entrypoint, so the container never boots. Truncate-and-write keeps
+            # the inode, so a file-level bind mount keeps working.
+            if sed "s|^system_ip=.*|system_ip=${UOS_SYSTEM_IP}|" \
+                   "$UNIFI_SYSTEM_PROPERTIES" > "${UNIFI_SYSTEM_PROPERTIES}.tmp"; then
+                cat "${UNIFI_SYSTEM_PROPERTIES}.tmp" > "$UNIFI_SYSTEM_PROPERTIES"
+                rm -f "${UNIFI_SYSTEM_PROPERTIES}.tmp"
+            else
+                # Leave the original untouched if the rewrite could not be staged.
+                rm -f "${UNIFI_SYSTEM_PROPERTIES}.tmp"
+                log_error "Could not update system_ip in $UNIFI_SYSTEM_PROPERTIES"
+                exit 1
+            fi
         else
             printf 'system_ip=%s\n' "$UOS_SYSTEM_IP" >> "$UNIFI_SYSTEM_PROPERTIES"
         fi
