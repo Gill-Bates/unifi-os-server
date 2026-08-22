@@ -11,12 +11,16 @@ permissions:
 
 jobs:
   stale:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
-      - uses: actions/stale@v10
+      # SHA-pinned like every other third-party action in this repo: a movable
+      # tag can be repointed at new code after review. v10 currently resolves to
+      # exactly this commit, so pinning changes no behaviour.
+      - uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v10.4.0
         with:
-          # Mark issues as stale after 30 days of inactivity
+          # Mark issues as stale after 14 days of inactivity
           days-before-issue-stale: 14
 
           # Close issues 7 days after being marked as stale
@@ -26,7 +30,7 @@ jobs:
 
           stale-issue-message: >
             This issue has been automatically marked as stale because there has
-            been no activity for the last 30 days. If this issue is still
+            been no activity for the last 14 days. If this issue is still
             relevant, simply leave a comment or push a related update to keep it
             open.
 

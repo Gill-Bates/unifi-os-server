@@ -351,7 +351,7 @@ The installer must not be downloaded from arbitrary user-provided hosts without 
 The extractor image should:
 
 - be reproducible where practical
-- use a pinned base image digest for controlled releases
+- track its base image by tag, not by digest — this image is a throwaway build tool that is never published, and a frozen digest silently ages its base packages while nothing forces them forward
 - avoid unnecessary packages
 - install only tools required for extraction and archive conversion
 - avoid baking installer URLs or secrets into image metadata
@@ -662,7 +662,8 @@ The agent must flag violations of this model.
 
 For reproducible releases:
 
-- pin base images by digest for release builds
+- pin by digest only what ends up in a published artifact; the extractor base is tracked by tag on purpose (see [Extractor Image Rules](#extractor-image-rules))
+- pin third-party GitHub Actions by commit SHA — that is a supply-chain control, not a freshness one, and it is unaffected by the rule above
 - record upstream version
 - record selected installer URLs
 - record image digests

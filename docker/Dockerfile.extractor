@@ -1,6 +1,12 @@
 # Extractor base image: provides the environment needed to run the Ubiquiti installer.
 # The installer is run in a privileged container from this image, not during build.
-FROM debian:trixie-slim@sha256:b6e2a152f22a40ff69d92cb397223c906017e1391a73c952b588e51af8883bf8
+#
+# Deliberately tracked by tag, not pinned by digest. This image is a throwaway
+# build tool — it is never published, and nothing in the released image derives
+# from it. Freshness beats byte-reproducibility here: a frozen digest silently
+# ages the base packages, while runtime validation and the smoke tests gate
+# whatever the build actually produces.
+FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
