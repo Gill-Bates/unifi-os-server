@@ -572,6 +572,27 @@ fi
     && row_ok  "Platform"     "$(cat /usr/lib/platform)" \
     || row_fail "Platform"    "missing"
 
+# Console identity. unifi-core aborts with "Unsupported console model" and
+# crash-loops when this cannot be resolved, which otherwise only shows up as an
+# inactive service with no stated cause.
+#
+# Probe the resolved outcome through ubnt-tools instead of the files it happens
+# to read: up to 5.1.21 it derived the model from /usr/lib/version, since 5.1.37
+# from /usr/lib/app_model. Checking the outcome survives the next such move.
+if [ -x /sbin/ubnt-tools ]; then
+    CONSOLE_MODEL="$(timeout 10 /sbin/ubnt-tools id 2>/dev/null \
+        | awk -F= '$1=="board.shortname"{print $2; exit}')"
+    if [ -n "$CONSOLE_MODEL" ]; then
+        row_ok "Console model" "$CONSOLE_MODEL"
+    else
+        row_fail "Console model" "unresolved — unifi-core cannot start"
+        hint_line "unifi-core aborts with 'Unsupported console model' and crash-loops."
+        hint_line "ubnt-tools found no model; inspect /usr/lib/app_model and /usr/lib/product_name."
+    fi
+else
+    row_info "Console model" "ubnt-tools not present — skipped"
+fi
+
 SYSPROPS="/var/lib/unifi/system.properties"
 if [ -f "$SYSPROPS" ]; then
     SYSTEM_IP="$(grep '^system_ip=' "$SYSPROPS" 2>/dev/null | cut -d= -f2 || echo '')"
