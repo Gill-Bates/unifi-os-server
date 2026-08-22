@@ -434,7 +434,12 @@ Its exit codes are part of the contract:
 
 Build validation must run the tool against the freshly built image and fail on exit 2, on any other abnormal exit, and when the summary section is not reached.
 
-That validation must stay version-agnostic. Do not assert failure counts, the PostgreSQL major version, database names, or specific paths — those vary legitimately between releases and inside a validation container without bind mounts. Pinning them converts the check into per-release maintenance work, which is exactly what it exists to prevent.
+Exit 1 alone is not a verdict: the tool returns it both for “warnings only” and for hard failures. Validation must read the counts out of the summary and treat the two differently:
+
+- **warnings are tolerated.** The validation container has no bind mounts and no `UOS_SYSTEM_IP`, so unmounted volume paths and an unset system_ip are expected and say nothing about the image.
+- **failures are not.** Every failing check means the image itself is broken — a missing or failed unit, an uninitialised database, a port not listening, an unresolvable console model.
+
+That validation must otherwise stay version-agnostic. Do not pin warning counts, the PostgreSQL major version, database names, or specific paths — those vary legitimately between releases and inside a bare validation container. Requiring zero *failures* asserts health; pinning any other number converts the check into per-release maintenance work, which is exactly what it exists to prevent.
 
 ---
 

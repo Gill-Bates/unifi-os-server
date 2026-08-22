@@ -1506,7 +1506,33 @@ validate_runtime_image() {
         fatal "Validation failed: diagnostics did not complete (no summary section)"
     fi
 
-    log "  ✓ diagnostics ran end-to-end (exit ${diag_rc})"
+    # Exit 1 is ambiguous by design — the tool returns it both for "warnings only"
+    # and for hard failures. Read the counts out of the summary instead:
+    #
+    #   warnings are environmental here and must be tolerated. The validation
+    #   container has no bind mounts and no UOS_SYSTEM_IP, so unmounted volume
+    #   paths and a missing system_ip are expected and say nothing about the image.
+    #
+    #   failures are not. Every failing check in the tool means the image itself is
+    #   broken: a missing or failed unit, an uninitialised database, a port that is
+    #   not listening, or an unresolvable console model.
+    local diag_failures diag_warnings
+    diag_failures=$(sed -nE 's/.*Failures[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' <<<"$diag_output" | head -1)
+    diag_warnings=$(sed -nE 's/.*Warnings[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' <<<"$diag_output" | head -1)
+
+    if [[ ! "$diag_failures" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$diag_output" >&2
+        preserve_failure "$container_name" "$arch" "validation" "diagnostics summary not parsable"
+        fatal "Validation failed: could not read the failure count from the diagnostics summary"
+    fi
+
+    if (( diag_failures > 0 )); then
+        printf '%s\n' "$diag_output" >&2
+        preserve_failure "$container_name" "$arch" "validation" "diagnostics reported ${diag_failures} failure(s)"
+        fatal "Validation failed: diagnostics reported ${diag_failures} failure(s) in the built image"
+    fi
+
+    log "  ✓ diagnostics ran end-to-end (0 failures, ${diag_warnings:-?} warning(s))"
 
     # --- Check 5: Restart test ---
     # Verify container survives a stop/start cycle (proves persistent state)
