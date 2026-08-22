@@ -240,9 +240,9 @@ Commonly used ports:
 |---:|:---:|:---:|---|
 | `11443` | TCP | ✔ | UniFi OS web interface |
 | `8080` | TCP | ✔ | Device communication |
-| `8443` | TCP | ✔ | UniFi Network application |
+| `8443` | TCP | | UniFi Network application |
 | `3478` | UDP | ✔ | STUN and adoption |
-| `10003` | UDP | | Device discovery |
+| `10003` | UDP | ✔ | Device discovery |
 
 Optional services may expose additional ports depending on your UniFi setup. Unused optional mappings can be removed from `docker-compose.yaml`.
 
