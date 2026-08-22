@@ -630,6 +630,7 @@ else
         | grep -v 'unifi\[.*\]: data:' \
         | grep -v 'unifi\[.*\]: tmpfs:' \
         | grep -v 'unifi\[.*\]: Warning: Could not mount tmpfs' \
+        | grep -v 'pre-start\[.*\]: createuser: error: creation of new role failed: ERROR: *role "unifi-core" already exists' \
         | grep -v 'unifi\[.*\]: Skipping load-environment' \
         | grep -v 'unifi\[.*\]: init-uos complete' \
         || true)"

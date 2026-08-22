@@ -352,6 +352,14 @@ preseed_postgres() {
     # Future versions may add/remove services. If services fail with
     # "database does not exist", add them here and bump the preseed marker.
     # Format: "dbname:owner"
+    #
+    # unifi-core is deliberately NOT listed here: its own pre-start.sh already
+    # creates the "unifi-core" role (createuser -d) before the service starts.
+    # Pre-creating it here would only make that upstream call fail on every
+    # single boot instead of just restarts with a persisted volume — it is
+    # non-idempotent regardless of who creates the role first. The resulting
+    # "role already exists" line on restarts is harmless (unifi-core still
+    # starts) and is filtered in diagnostics.sh's Recent Errors section.
     # -------------------------------------------------------------------------
     local db_configs=(
         "ulp-go:ulp-go"
