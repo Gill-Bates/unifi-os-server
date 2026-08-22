@@ -28,12 +28,6 @@
   </a>
 </p>
 
-<p align="center">
-  <a href="https://www.buymeacoffee.com/tnsteinerx">
-    <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20beer&emoji=🍺&slug=tnsteinerx&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me A Coffee">
-  </a>
-</p>
-
 ---
 
 ## Overview
@@ -307,3 +301,9 @@ This project is not affiliated with, endorsed by, or sponsored by Ubiquiti Inc. 
 ## License
 
 See [LICENSE](LICENSE).
+
+<p align="center">
+  <a href="https://www.buymeacoffee.com/tnsteinerx">
+    <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20beer&emoji=🍺&slug=tnsteinerx&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me A Coffee">
+  </a>
+</p>
