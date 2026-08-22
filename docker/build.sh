@@ -332,6 +332,32 @@ preserve_failure() {
     diag "Saving container logs..."
     timeout 30 docker logs "$container_name" > "${prefix}-stdout.log" 2> "${prefix}-stderr.log" || true
 
+    # Systemd state from inside the container.
+    # `docker logs` stops at "Handing off to systemd" unless UOS_SHOW_JOURNAL=true,
+    # so without this a validation failure records *which* unit is inactive but
+    # never *why*. Only meaningful while the container is still up, which is the
+    # normal case for a validation failure (the container is deliberately kept).
+    if [[ "$(get_container_state "$container_name")" == "running" ]]; then
+        diag "Capturing systemd state..."
+        timeout 20 docker exec "$container_name" \
+            systemctl list-units --state=failed --no-pager --no-legend \
+            > "${prefix}-systemd-failed.txt" 2>&1 || true
+        timeout 20 docker exec "$container_name" \
+            systemctl status --no-pager --full --lines=50 unifi-core unifi nginx mongodb \
+            > "${prefix}-systemd-status.txt" 2>&1 || true
+        timeout 30 docker exec "$container_name" \
+            journalctl --no-pager --lines=500 --priority=warning --output=short-iso \
+            > "${prefix}-journal.txt" 2>&1 || true
+
+        # Surface the failed units directly in the CI log — the artifact is only
+        # reachable after the run, the log is what someone reads first.
+        if [[ -s "${prefix}-systemd-failed.txt" ]]; then
+            warn "--- failed systemd units ---"
+            head -20 "${prefix}-systemd-failed.txt" >&2 || true
+            warn "--- end failed units ---"
+        fi
+    fi
+
     # If both logs are empty, the container likely crashed before producing output.
     # Check the bind-mounted extract.log first — it's written before docker logging
     # initialises and therefore survives sub-100ms crashes.
@@ -1389,7 +1415,12 @@ validate_runtime_image() {
 
     if (( ${#pending_services[@]} > 0 )); then
         for svc in "${pending_services[@]}"; do
-            warn "  ✗ $svc is not active (after ${service_timeout}s)"
+            # Report the actual unit state: "failed" and "activating" call for very
+            # different responses, and the bare "not active" hides which one it is.
+            local svc_state
+            svc_state=$(timeout 15 docker exec "$container_name" \
+                systemctl is-active "$svc" 2>/dev/null; true)
+            warn "  ✗ $svc is not active (state: ${svc_state:-unknown}, after ${service_timeout}s)"
         done
         preserve_failure "$container_name" "$arch" "validation" "Critical service check failed"
         fatal "Validation failed: one or more critical services are inactive"

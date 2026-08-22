@@ -167,8 +167,22 @@ if ! printf '%s' "$UOS_SERVER_VERSION" | grep -Eq '^[0-9][0-9.]*$'; then
     log_error "Invalid UOS_SERVER_VERSION: $UOS_SERVER_VERSION"
     exit 1
 fi
-echo "UOSSERVER.0000000.$UOS_SERVER_VERSION.0000000.000000.0000" > /usr/lib/version
+# Console identity. On a real host these files are provisioned by the Ubiquiti
+# installer; the extracted container image does not carry them, so we write them
+# here. /sbin/ubnt-tools reads them and unifi-core refuses to start without a
+# recognised model ("Unsupported console model: \"\"" in a crash loop).
+#
+# Up to 5.1.21 ubnt-tools derived the model as `cut -d. -f1 /usr/lib/version`,
+# so the version string alone was enough. Since 5.1.37 it reads /usr/lib/app_model
+# instead. Both are written from the same constant so they cannot drift apart.
+UOS_APP_MODEL="UOSSERVER"
+UOS_PRODUCT_NAME="UniFi OS Server"
+
+echo "${UOS_APP_MODEL}.0000000.$UOS_SERVER_VERSION.0000000.000000.0000" > /usr/lib/version
+printf '%s\n' "$UOS_APP_MODEL"    > /usr/lib/app_model
+printf '%s\n' "$UOS_PRODUCT_NAME" > /usr/lib/product_name
 log_success "Version: $UOS_SERVER_VERSION"
+log_success "Console model: $UOS_APP_MODEL"
 
 # Detect architecture and set firmware platform
 ARCH="$(dpkg --print-architecture)"

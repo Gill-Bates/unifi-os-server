@@ -32,6 +32,7 @@ The agent helps to:
 - validate container startup and service health
 - keep build and runtime environments separated
 - document failures with actionable diagnostics
+- keep the shipped runtime diagnostics tool working across upstream version bumps
 - maintain CI/CD workflows for safe release automation
 - prevent accidental publication of invalid images
 
@@ -78,7 +79,24 @@ https://download.svc.ui.com/v1/downloads/products/slugs/unifi-os-server
 
 Do not use scraping, browser automation, mirrors, or third-party release sources unless explicitly approved.
 
-Web access (`fetch`) is permitted only for the official Ubiquiti release API and official installer hosts. It must not be used for browser automation or third-party version discovery.
+Web access (`fetch`) is permitted only for these host groups:
+
+```text
+download.svc.ui.com      release metadata
+ui.com, dl.ui.com,
+fw-download.ubnt.com     installer downloads
+community.svc.ui.com,
+community.ui.com         official release notes
+hub.docker.com,
+registry-1.docker.io,
+auth.docker.io           registry publishing and lifecycle
+```
+
+This allowlist applies to both the native `fetch` tool and any shell-level network commands (e.g., `curl`, `wget`) executed via `runCommands`.
+
+It must not be used for browser automation or third-party version discovery.
+
+Adding a host to this list is a policy decision. Code or agent commands that reach an unlisted host is a finding.
 
 Validate all external data before using it.
 
@@ -185,6 +203,14 @@ Do not treat API failures as “no update available.”
 
 A broken release metadata fetch is a workflow failure.
 
+## Version Pinning Across Workflows
+
+Version discovery and image build run as separate workflows. The discovered version **and both installer URLs** must be handed to the build as explicit `workflow_dispatch` inputs.
+
+The build must not re-resolve “latest” on its own when a version was requested. A release published upstream between check and build would otherwise be built while the workflow still expects the checked version — the build's own version guard then fails, or an unselected version gets published.
+
+Every input a dispatching workflow passes must be declared in the receiving workflow's `workflow_dispatch.inputs`. Undeclared inputs are rejected with HTTP 422 and the dispatch never runs.
+
 ---
 
 ## Build Phases
@@ -202,7 +228,9 @@ Phase 2: Run extraction
   → run installer in controlled extractor container
   → observe Podman storage
   → locate explicit uosserver image
-  → export Docker-compatible archive
+  → export Docker-compatible archive to a staged temporary name
+  → publish it atomically after validation
+  → write the completion sentinel last
 
 Phase 3: Load extracted image
   → load uosserver.tar into Docker
@@ -220,8 +248,9 @@ Phase 5: Validate runtime image
   → verify systemd readiness
   → verify critical services
   → verify expected listening ports
+  → run the shipped diagnostics tool end-to-end
   → verify restart behavior
-  → preserve diagnostics on failure
+  → preserve failure diagnostics on failure
 
 Phase 6: Scan and publish
   → scan images
@@ -232,6 +261,24 @@ Phase 6: Scan and publish
 ```
 
 A build must not publish images if extraction, runtime validation, scanning, or manifest creation fails.
+
+---
+
+# Extraction Handoff Rules
+
+The extractor container and the build host communicate through the mounted output directory only. That handoff is a contract:
+
+- the archive is written under a temporary name in the output directory
+- size and format validation run against the staged file
+- repair, when needed, runs against the staged file
+- a single same-filesystem rename publishes it under the watched name
+- the `.extraction-done` sentinel is written last, after `sync`
+
+The build monitor must treat the sentinel as authoritative. Presence, size, or size-stability of the archive alone must never be accepted as success.
+
+A failed or interrupted extraction must not leave a file under the published name.
+
+The background installer process must be terminated on every exit path, not only on the success path.
 
 ---
 
@@ -259,6 +306,7 @@ Multi-arch tags should follow this pattern:
 ```text
 <version>
 latest
+dev        development builds only — never promoted to latest
 ```
 
 ---
@@ -362,6 +410,34 @@ Persistent state markers must only be written after the corresponding operation 
 
 ---
 
+# Runtime Diagnostics Tool Rules
+
+The runtime image ships a `diagnostics` tool. It is the documented first step for users reporting problems, so it must keep working across upstream version bumps.
+
+The tool must:
+
+- declare every external binary it needs in its preflight
+- bound every blocking probe, including database queries
+- bound how much journal output it reads into memory
+- treat unit names parsed from log output as literal text, not as patterns
+- read files from user-supplied mounts with a length bound
+- never report a total it did not actually count
+- always reach its summary section
+
+Its exit codes are part of the contract:
+
+```text
+0  all checks passed
+1  warnings and/or failures found
+2  a required binary is missing
+```
+
+Build validation must run the tool against the freshly built image and fail on exit 2, on any other abnormal exit, and when the summary section is not reached.
+
+That validation must stay version-agnostic. Do not assert failure counts, the PostgreSQL major version, database names, or specific paths — those vary legitimately between releases and inside a validation container without bind mounts. Pinning them converts the check into per-release maintenance work, which is exactly what it exists to prevent.
+
+---
+
 # Shell Script Rules
 
 For Bash scripts:
@@ -379,6 +455,9 @@ For Bash scripts:
 - avoid overwriting existing traps accidentally
 - validate external input before privileged operations
 - keep stdout clean when it is used for return values
+- bound every blocking external command (`docker`, `podman`, `skopeo`, database clients) with `timeout`, especially inside cleanup traps and polling loops
+- measure polling deadlines against wall clock (`$SECONDS`), never against the sum of the sleep intervals — blocking calls inside the loop are otherwise unaccounted and the real ceiling silently exceeds the nominal one
+- do not limit a producer with `| head -n …` under `pipefail` when it may still be writing; limit inside the producer instead, so it exits cleanly instead of on `SIGPIPE`
 
 For POSIX `sh` scripts:
 
@@ -417,9 +496,13 @@ GitHub Actions workflows must:
 - validate all data written to `$GITHUB_OUTPUT`
 - validate all data written to `$GITHUB_ENV`
 - use explicit shell safety settings
-- use timeouts for network operations
+- use timeouts for network operations, including every `curl` invocation
+- set `timeout-minutes` on every job
+- keep job timeouts *above* the invoked scripts' own internal ceilings — a job timeout cancels the job, and `if: failure()` artifact uploads do not run on cancellation, so a job limit that fires first destroys the diagnostics
+- declare every input that a dispatching workflow passes
 - use concurrency controls where duplicate releases are possible
 - avoid publishing from failed or degraded validation
+- never use the `pull_request_target` trigger on workflows that have access to secrets
 - avoid pushing on pull requests from untrusted forks
 - avoid exposing secrets to untrusted code
 - pin runner versions where reproducibility matters
@@ -452,6 +535,22 @@ Do not publish degraded images unless there is an explicit, documented emergency
 
 ---
 
+# Registry Lifecycle Rules
+
+After the manifest is published, the build deletes architecture-specific tags and prunes untagged image objects through the registry API.
+
+Cleanup must:
+
+- run only after the manifest push succeeded
+- never block the release when it fails
+- enumerate live tags and protect every digest they reference, including child platform manifests
+- abort the entire prune when the protected list cannot be completed
+- treat 404 as “already gone”, and distinguish it from transient errors before acting
+
+An incomplete protected list combined with an active delete loop is the only combination that can destroy live tags. A skipped prune costs nothing — the next run cleans up.
+
+---
+
 # Vulnerability Scanning Rules
 
 Trivy or equivalent scanning must:
@@ -465,6 +564,20 @@ Trivy or equivalent scanning must:
 A `.trivyignore` entry must include a reason and should be reviewed periodically.
 
 Critical vulnerabilities must not be ignored silently.
+
+## Current Policy
+
+Scanning is **non-blocking by default** (`enforce_trivy_gate: false`), and automated releases dispatch with that default.
+
+This is deliberate, not an oversight: the image packages Ubiquiti's official software, and most findings originate from upstream components that cannot be fixed in this repository. A fix must come from an upstream release.
+
+The trade-off is bounded by:
+
+- scan results are always uploaded as artifacts
+- findings are summarised in the GitHub Release body
+- `enforce_trivy_gate: true` makes the gate blocking on demand
+
+Non-blocking must never mean unreported. Changing this default is a policy decision, not a build tweak.
 
 ---
 
@@ -588,7 +701,7 @@ A build must fail if:
 - critical services are inactive
 - expected ports are missing
 - validation is degraded and publishing is requested
-- Trivy finds blocking vulnerabilities
+- Trivy finds blocking vulnerabilities while the gate is enabled
 - manifest creation fails
 - version metadata is incomplete or inconsistent
 
@@ -601,7 +714,7 @@ A release is done only when:
 - all required build phases completed
 - all requested architectures succeeded
 - runtime validation passed
-- vulnerability scanning passed
+- vulnerability scanning completed and its result was recorded
 - image tags are correct
 - multi-arch manifest is correct
 - `latest` points to the same release as the newest versioned manifest
