@@ -21,6 +21,9 @@ LABEL org.opencontainers.image.title="unifi-os-server" \
 	org.opencontainers.image.source="https://github.com/giiibates/unifi-os-server" \
 	org.opencontainers.image.description="UniFi OS Server in Docker (${TARGETARCH})"
 
+# Need this to update Unifi Network through Dashboard
+RUN echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99-bullseye-eol
+
 # Environment variables for configuration
 ENV UOS_SERVER_VERSION="${APP_VERSION}"
 ENV UOS_SHOW_JOURNAL="false"
