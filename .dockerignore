@@ -1,14 +1,9 @@
-# Keep UniFi installer binaries out of the Docker build context/cache.
-*-linux-x64-*
-
 # Keep the Docker build context minimal so installer binaries and runtime state
 # never end up in the local build cache.
 *
-!docker/Dockerfile
 !docker/Dockerfile.extractor
 !docker/Dockerfile.runtime
 !docker/build.sh
-!docker/entrypoint.sh
 !docker/uos-entrypoint.sh
 !docker/diagnostics.sh
 !docker/extract-uosserver.sh
@@ -16,5 +11,3 @@
 !docker/systemctl-stub.sh
 !README.md
 !.dockerignore
-!unifi-os-server.conf
-!build-artifacts/

@@ -37,6 +37,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
+REGISTRY_LIB="${SCRIPT_DIR}/lib/registry-version.sh"
+if [[ ! -r "$REGISTRY_LIB" ]]; then
+    printf '[build] Missing required library: %s\n' "$REGISTRY_LIB" >&2
+    exit 1
+fi
+# shellcheck source=lib/registry-version.sh
+source "$REGISTRY_LIB"
+
 load_dotenv_defaults() {
     local env_file="${REPO_ROOT}/.env"
     [[ -f "$env_file" ]] || return 0
@@ -506,126 +514,8 @@ validate_api_url() {
     esac
 }
 
-version_ge() {
-    local candidate="$1"
-    local baseline="$2"
-
-    [[ "$(printf '%s\n%s\n' "$baseline" "$candidate" | sort -V | tail -n 1)" == "$candidate" ]]
-}
-
-docker_hub_repo_path() {
-    local image="$IMAGE_NAME"
-    local first_component="${image%%/*}"
-
-    if [[ "$image" == docker.io/* ]]; then
-        image="${image#docker.io/}"
-    elif [[ "$image" == registry-1.docker.io/* ]]; then
-        image="${image#registry-1.docker.io/}"
-    elif [[ "$first_component" == *.* || "$first_component" == *:* || "$first_component" == "localhost" ]]; then
-        return 1
-    fi
-
-    if [[ "$image" != */* ]]; then
-        image="library/${image}"
-    fi
-
-    printf '%s\n' "$image"
-}
-
-fetch_docker_hub_token() {
-    local repo="$1"
-    local token
-
-    token="$(
-        curl -fsSL \
-            --connect-timeout 10 \
-            --max-time 20 \
-            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" \
-            | jq -r '.token // empty'
-    )" || return 1
-
-    [[ -n "$token" ]] || return 1
-    printf '%s\n' "$token"
-}
-
-fetch_registry_json() {
-    local url="$1"
-    local token="$2"
-    local accept_header="${3:-application/json}"
-    local response status body
-
-    response="$(
-        curl -sS -L -w '\n%{http_code}' \
-            --connect-timeout 10 \
-            --max-time 20 \
-            -H "Authorization: Bearer ${token}" \
-            -H "Accept: ${accept_header}" \
-            "$url"
-    )" || return 1
-
-    status="$(tail -n 1 <<< "$response")"
-    body="$(sed '$d' <<< "$response")"
-
-    case "$status" in
-        200)
-            printf '%s\n' "$body"
-            ;;
-        404)
-            return 2
-            ;;
-        *)
-            warn "Registry request failed with HTTP ${status}: ${url}"
-            return 1
-            ;;
-    esac
-}
-
-fetch_current_latest_version() {
-    local repo token manifest child_digest child_manifest config_digest config version
-    local accept_header='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
-
-    repo="$(docker_hub_repo_path)" || return 3
-    token="$(fetch_docker_hub_token "$repo")" || return 1
-
-    manifest="$(
-        fetch_registry_json \
-            "https://registry-1.docker.io/v2/${repo}/manifests/latest" \
-            "$token" \
-            "$accept_header"
-    )" || return $?
-
-    child_digest="$(jq -r 'first(.manifests[]? | select(.platform.architecture == "amd64") | .digest) // empty' <<< "$manifest")"
-    if [[ -z "$child_digest" ]]; then
-        child_digest="$(jq -r '.manifests[0]?.digest // empty' <<< "$manifest")"
-    fi
-
-    if [[ -n "$child_digest" ]]; then
-        child_manifest="$(
-            fetch_registry_json \
-                "https://registry-1.docker.io/v2/${repo}/manifests/${child_digest}" \
-                "$token" \
-                "$accept_header"
-        )" || return 1
-    else
-        child_manifest="$manifest"
-    fi
-
-    config_digest="$(jq -r '.config.digest // empty' <<< "$child_manifest")"
-    [[ -n "$config_digest" ]] || return 1
-
-    config="$(
-        fetch_registry_json \
-            "https://registry-1.docker.io/v2/${repo}/blobs/${config_digest}" \
-            "$token"
-    )" || return 1
-
-    version="$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' <<< "$config")"
-    [[ "$version" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]] || return 1
-    printf '%s\n' "$version"
-}
-
 resolve_promote_latest() {
-    local promote current_latest status
+    local promote current_latest status repo token
 
     case "$PROMOTE_LATEST" in
         true)
@@ -647,7 +537,14 @@ resolve_promote_latest() {
     esac
 
     if [[ "$promote" == "true" ]]; then
-        if current_latest="$(fetch_current_latest_version)"; then
+        if ! repo="$(docker_hub_repo_path "$IMAGE_NAME")"; then
+            fatal "Cannot verify latest version for non-Docker-Hub IMAGE_NAME (${IMAGE_NAME}); set PROMOTE_LATEST=false"
+        fi
+        if ! token="$(fetch_docker_hub_token "$repo")"; then
+            fatal "Could not obtain Docker Hub pull token for ${repo}; refusing latest promotion"
+        fi
+
+        if current_latest="$(fetch_current_latest_version "$repo" "$token")"; then
             log "Current latest version: ${current_latest}"
             if ! version_ge "$VERSION" "$current_latest"; then
                 warn "Refusing to move latest backward: built ${VERSION}, current latest ${current_latest}"
@@ -660,7 +557,7 @@ resolve_promote_latest() {
                     log "No current latest manifest found; latest promotion is allowed"
                     ;;
                 3)
-                    fatal "Cannot verify latest version for non-Docker-Hub IMAGE_NAME (${IMAGE_NAME}); set PROMOTE_LATEST=false"
+                    fatal "Published latest has an unusable version label; refusing latest promotion"
                     ;;
                 *)
                     fatal "Current latest version could not be resolved; refusing latest promotion"

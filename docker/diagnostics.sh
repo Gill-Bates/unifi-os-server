@@ -112,8 +112,9 @@ render_table() {
     # Rows
     for i in "${!TABLE_ROWS[@]}"; do
         local row="${TABLE_ROWS[$i]}"
-        local status cat lbl note icon color
-        IFS='|' read -r status cat lbl note <<< "$row"
+        local status lbl note icon color
+        # Field 2 is the category; it is not rendered in the table.
+        IFS='|' read -r status _ lbl note <<< "$row"
         # F6: strip multibyte chars from note before measuring — use ASCII-only
         # display values to avoid printf width miscalculation.
         local note_display
@@ -431,7 +432,12 @@ elif ! systemctl is-active --quiet "${PG_UNIT}" 2>/dev/null; then
     row_warn "Databases" "PostgreSQL not running — skipped"
 else
     ALL_DBS_OK=1
+    # Must mirror db_configs in docker/uos-entrypoint.sh (preseed list). A
+    # database the entrypoint creates but this tool never checks is a gap: the
+    # owning service fails with "database does not exist" while diagnostics
+    # reports PostgreSQL as healthy.
     for db in "ulp-go" "ulp-go-syslog" "uid" \
+              "unifi-credential-server" "ucs-user-assets" \
               "ucs-agent" "unifi-directory" "unifi-identity-update"; do
         # timeout: psql blocks forever when PostgreSQL is up but wedged (exhausted
         # pool, deadlock) — exactly the state this tool is meant to report on.
@@ -487,35 +493,30 @@ render_table "Network Listeners"
 
 # ===========================================================================
 # 6. BIND-MOUNTS & VOLUME PATHS
-# Tiers aligned to docker-compose.yaml:
-#   required = declared as a volume in the project compose file
-#   optional = useful to mount but not declared; absence is acceptable
-# F3 fix: only required mounts warn/fail; optional mounts are informational.
+# All entries below are declared as required volumes in docker-compose.yaml.
+# There is currently no optional mount in the project — every path here must
+# exist and be bind-mounted for persistent data to survive container recreation.
 # ===========================================================================
 _CAT="Volumes"
 
-# "path:label:tier" — required entries match the compose volumes block
+# "path:label"
 VOLUME_LIST=(
-    "/persistent:Persistent config:required"
-    "/var/log:Log files:required"
-    "/data:Application data:required"
-    "/srv:Srv data:required"
-    "/var/lib/unifi:UniFi data:required"
-    "/var/lib/postgresql:PostgreSQL data:required"
-    "/var/lib/mongodb:MongoDB data:required"
-    "/etc/rabbitmq/ssl:RabbitMQ SSL certs:required"
+    "/persistent:Persistent config"
+    "/var/log:Log files"
+    "/data:Application data"
+    "/srv:Srv data"
+    "/var/lib/unifi:UniFi data"
+    "/var/lib/postgresql:PostgreSQL data"
+    "/var/lib/mongodb:MongoDB data"
+    "/etc/rabbitmq/ssl:RabbitMQ SSL certs"
 )
 
 for entry in "${VOLUME_LIST[@]}"; do
-    mnt="${entry%%:*}"; rest="${entry#*:}"; label="${rest%%:*}"; tier="${rest##*:}"
+    mnt="${entry%%:*}"; label="${entry#*:}"
 
     if ! [ -d "$mnt" ]; then
-        if [ "$tier" = "required" ]; then
-            row_fail "$label" "path does not exist: ${mnt}"
-            hint_line "Create the directory and add a bind-mount in docker-compose.yaml."
-        else
-            row_info "$label" "not present (optional)"
-        fi
+        row_fail "$label" "path does not exist: ${mnt}"
+        hint_line "Create the directory and add a bind-mount in docker-compose.yaml."
         continue
     fi
 
@@ -531,12 +532,8 @@ for entry in "${VOLUME_LIST[@]}"; do
             row_ok   "$label" "${AVAIL_MB} MB free (${mnt})"
         fi
     else
-        if [ "$tier" = "required" ]; then
-            row_warn "$label" "not bind-mounted — data lost when container is recreated"
-            hint_line "Add a volume mount for '${mnt}' in docker-compose.yaml."
-        else
-            row_info "$label" "not mounted (container-local, acceptable)"
-        fi
+        row_warn "$label" "not bind-mounted — data lost when container is recreated"
+        hint_line "Add a volume mount for '${mnt}' in docker-compose.yaml."
     fi
 done
 

@@ -179,11 +179,17 @@ mkdir -p data/{persistent,var-log,data,srv,var-lib-unifi,var-lib-postgresql,var-
 
 ### 3. Configure `UOS_SYSTEM_IP`
 
-Edit `docker-compose.yaml` and set the address that UniFi devices should use to reach this server.
+Set the address that UniFi devices should use to reach this server. The Compose file reads it from the environment, so a `.env` file next to `docker-compose.yaml` is enough:
+
+```dotenv
+UOS_SYSTEM_IP=unifi.example.com
+```
+
+Alternatively edit the value directly in `docker-compose.yaml`:
 
 ```yaml
 environment:
-  - UOS_SYSTEM_IP=unifi.example.com
+  UOS_SYSTEM_IP: unifi.example.com
 ```
 
 You can use either a DNS name or an IP address.

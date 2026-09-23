@@ -486,6 +486,14 @@ jobs:
       contents: read
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            docker/lib/registry-version.sh
+          sparse-checkout-cone-mode: false
+
       - name: Log in to Docker Hub
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
@@ -528,85 +536,28 @@ jobs:
         run: |
           # INPUT_* are set via env (not inline expressions) to prevent shell
           # injection — GitHub expands expressions textually before the shell runs.
+          # shellcheck source=docker/lib/registry-version.sh
+          source "${GITHUB_WORKSPACE}/docker/lib/registry-version.sh"
+
           AMD_VERSION="${{ needs.build-amd64.outputs.version }}"
           ARM_VERSION="${{ needs.build-arm64.outputs.version }}"
           VERSION="$AMD_VERSION"
           REQUESTED_VERSION="${INPUT_VERSION}"
           PROMOTE_LATEST_INPUT="${INPUT_PROMOTE_LATEST}"
           DEV_IMAGE="${INPUT_DEV_IMAGE:-false}"
-          REGISTRY_TOKEN="$(
-            curl -fsSL --connect-timeout 10 --max-time 30 \
-              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAME}:pull" \
-              | jq -r '.token // empty'
-          )"
-          ACCEPT_HEADER='application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json'
-
-          if [[ -z "${REGISTRY_TOKEN}" ]]; then
+          # IMAGE_NAME (env, repo-wide) is already a Docker Hub "namespace/repo"
+          # path here, but run it through docker_hub_repo_path for the same
+          # normalization docker/build.sh applies (e.g. an implicit "library/"
+          # prefix), so both callers derive the repo path identically.
+          REPO_PATH="$(docker_hub_repo_path "${IMAGE_NAME}")" || {
+            echo "IMAGE_NAME is not a Docker Hub reference: ${IMAGE_NAME}" >&2
+            exit 1
+          }
+          # Guard with || : under `set -e` a failing assignment aborts the step
+          # immediately, so a following emptiness check would never print.
+          REGISTRY_TOKEN="$(fetch_docker_hub_token "$REPO_PATH")" || {
             echo "Failed to obtain Docker registry pull token" >&2
             exit 1
-          fi
-
-          version_ge() {
-            local candidate="$1"
-            local baseline="$2"
-
-            [[ "$(printf '%s\n%s\n' "$baseline" "$candidate" | sort -V | tail -n 1)" == "$candidate" ]]
-          }
-
-          fetch_manifest() {
-            local ref="$1"
-
-            curl -fsSL --connect-timeout 10 --max-time 30 \
-              -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
-              -H "Accept: ${ACCEPT_HEADER}" \
-              "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/${ref}"
-          }
-
-          fetch_current_latest_version() {
-            local manifest child_digest child_manifest config_digest config version
-            local http_status response
-
-            # P2.3 fix: distinguish 404 (no latest) from transient errors.
-            # curl -f would treat both as failure — use -w '%{http_code}' instead.
-            response="$(
-              curl -sS --connect-timeout 10 --max-time 30 -w '\n%{http_code}' \
-                -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
-                -H "Accept: ${ACCEPT_HEADER}" \
-                "https://registry-1.docker.io/v2/${IMAGE_NAME}/manifests/latest"
-            )"
-            http_status="$(printf '%s\n' "$response" | tail -n 1)"
-            manifest="$(printf '%s\n' "$response" | sed '$d')"
-
-            if [[ "$http_status" == "404" ]]; then
-              return 2   # No latest tag exists — promotion is allowed
-            elif [[ "$http_status" != "200" ]]; then
-              echo "Registry returned HTTP ${http_status} fetching latest manifest — treating as transient error" >&2
-              return 1   # Transient error — hard fail in caller, do not promote
-            fi
-
-            child_digest="$(jq -r 'first(.manifests[]? | select(.platform.architecture == "amd64") | .digest) // empty' <<< "$manifest")"
-            if [[ -z "$child_digest" ]]; then
-              child_digest="$(jq -r '.manifests[0]?.digest // empty' <<< "$manifest")"
-            fi
-
-            if [[ -n "$child_digest" ]]; then
-              child_manifest="$(fetch_manifest "$child_digest")"
-            else
-              child_manifest="$manifest"
-            fi
-
-            config_digest="$(jq -r '.config.digest // empty' <<< "$child_manifest")"
-            [[ -n "$config_digest" ]] || return 1
-
-            config="$(
-              curl -fsSL --connect-timeout 10 --max-time 30 \
-                -H "Authorization: Bearer ${REGISTRY_TOKEN}" \
-                "https://registry-1.docker.io/v2/${IMAGE_NAME}/blobs/${config_digest}"
-            )"
-
-            version="$(jq -r '.config.Labels["org.opencontainers.image.version"] // empty' <<< "$config")"
-            [[ -n "$version" ]] || return 1
-            printf '%s\n' "$version"
           }
 
           if [[ -z "$AMD_VERSION" ]]; then
@@ -621,7 +572,7 @@ jobs:
             echo "Version mismatch between architectures: amd64=$AMD_VERSION arm64=$ARM_VERSION" >&2
             exit 1
           fi
-          
+
           # Verify both arch images are available — the needs-guard guarantees
           # both build jobs succeeded, but a Hub-side race or a concurrent delete
           # could still leave one tag missing. Publishing a "multi-arch" manifest
@@ -670,7 +621,7 @@ jobs:
           fi
 
           if [[ "$PROMOTE_LATEST" == "true" ]]; then
-            if CURRENT_LATEST_VERSION="$(fetch_current_latest_version)"; then
+            if CURRENT_LATEST_VERSION="$(fetch_current_latest_version "$REPO_PATH" "$REGISTRY_TOKEN")"; then
               echo "Current latest version: ${CURRENT_LATEST_VERSION}"
               if ! version_ge "$VERSION" "$CURRENT_LATEST_VERSION"; then
                 echo "Refusing to move latest backward: built ${VERSION}, current latest ${CURRENT_LATEST_VERSION}" >&2
@@ -686,7 +637,7 @@ jobs:
               fi
             fi
           fi
-          
+
           echo "Creating manifest with: ${IMAGES[*]}"
           echo "Manifest tag: ${MANIFEST_TAG}"
           echo "Promote latest: ${PROMOTE_LATEST}"
@@ -702,14 +653,14 @@ jobs:
           # Create and push primary manifest (:VERSION or :dev)
           docker manifest create "${MANIFEST_TAG}" "${IMAGES[@]}" --amend
           docker manifest push "${MANIFEST_TAG}" || { echo "Manifest push failed: ${MANIFEST_TAG}" >&2; exit 1; }
-          
+
           if [[ "$PROMOTE_LATEST" == "true" ]]; then
             docker manifest create "${IMAGE_NAME}:latest" "${IMAGES[@]}" --amend
             docker manifest push "${IMAGE_NAME}:latest" || { echo "latest manifest push failed" >&2; exit 1; }
           else
             echo "Skipped latest manifest promotion"
           fi
-          
+
           echo "Pushed manifests:"
           echo "  ${MANIFEST_TAG}"
           if [[ "$PROMOTE_LATEST" == "true" ]]; then

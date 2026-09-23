@@ -172,12 +172,12 @@ jobs:
             local value="$2"
             printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
           }
-          
+
           echo "API metadata available: $API_AVAILABLE"
           echo "Current version: $CURRENT"
           echo "Latest version: $LATEST"
           echo "Force build: $FORCE"
-          
+
           set_output api_available "$API_AVAILABLE"
           set_output current_version "$CURRENT"
           set_output latest_version "$LATEST"
