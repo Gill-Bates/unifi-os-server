@@ -631,6 +631,9 @@ jobs:
               LATEST_STATUS=$?
               if [[ "$LATEST_STATUS" == "2" ]]; then
                 echo "No current latest manifest found; promotion is allowed."
+              elif [[ "$LATEST_STATUS" == "3" ]]; then
+                echo "::warning::Published latest has an unusable version label; skipping latest promotion."
+                PROMOTE_LATEST=false
               else
                 echo "Current latest version could not be resolved; refusing latest promotion." >&2
                 exit 1
