@@ -7,4 +7,10 @@ full_codebase*
 .env
 data/
 *.tar
+
+# IDE and tool specific directories
+.claude/
+.omc/
+.omx/
+.vscode/
 .claude/
