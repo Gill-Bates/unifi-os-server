@@ -90,9 +90,13 @@ community.ui.com         official release notes
 hub.docker.com,
 registry-1.docker.io,
 auth.docker.io           registry publishing and lifecycle
+docs.github.com,
+api.github.com           verifying runner support and Actions behavior
 ```
 
-This allowlist applies to both the native `fetch` tool and any shell-level network commands (e.g., `curl`, `wget`) executed via `runCommands`.
+This allowlist applies to both the native `fetch` tool and any shell-level network commands (e.g., `curl`, `wget`) executed via `runCommands` — i.e. requests the agent itself makes while assisting.
+
+It does not govern network access *inside* a CI job (package repositories reached by `apt-get` in the extractor build, Trivy's vulnerability database, container registry pulls) — that access is configured and reviewed as part of the workflow and Dockerfiles themselves, not as part of the agent's own tool use.
 
 It must not be used for browser automation or third-party version discovery.
 
@@ -178,7 +182,7 @@ Currently expected runtime requirements may include:
 - `NET_ADMIN`
 - `/sys/fs/cgroup` mount
 
-These requirements must remain subject to regression testing.
+These requirements must remain subject to regression testing — i.e. every build's Phase 5 validation (see [Build Phases](#build-phases)) re-verifies that the container still starts and behaves correctly with exactly this capability set, so a capability cannot be silently dropped or widened without a build noticing. This is distinct from the standalone, broader regression suites tracked under [Long-Term Goals](#long-term-goals).
 
 ---
 
@@ -276,6 +280,8 @@ The extractor container and the build host communicate through the mounted outpu
 
 The build monitor must treat the sentinel as authoritative. Presence, size, or size-stability of the archive alone must never be accepted as success.
 
+Before starting the installer, the output directory must not already contain `.extraction-done` or a file under the published archive name. A pre-existing sentinel or archive is a hard failure, not something to delete and continue past — it means the output directory was reused across runs, and a stale sentinel from a prior run could otherwise be misread as this run's success.
+
 A failed or interrupted extraction must not leave a file under the published name.
 
 The background installer process must be terminated on every exit path, not only on the success path.
@@ -292,6 +298,7 @@ For multi-architecture builds:
 - the multi-arch manifest must be created only after all architecture builds succeed
 - manifest creation errors must not be ignored
 - `latest` must only be updated after the versioned manifest is successfully pushed
+- `latest` may move only to the currently selected production release (see [Release Discovery Rules](#release-discovery-rules)) and must never move backward; a manually requested build of an older version must not promote it
 - local and CI builds must not silently mix versions
 
 Architecture tags should follow this pattern:
@@ -322,6 +329,7 @@ When selecting the latest release:
 - reject incomplete release groups
 - prefer explicit API fields over parsing version from URLs
 - only derive a version from a URL as a fallback after validation
+- select only a production/GA release when the API exposes a channel or status field; a beta, RC, or early-access entry requires an explicit opt-in and must never be treated as "latest" implicitly
 
 The agent must flag code that independently selects amd64 and arm64 latest URLs.
 
@@ -495,11 +503,12 @@ GitHub Actions workflows must:
 
 - define minimal `permissions`
 - avoid broad default token permissions
-- use maintained action versions
+- use maintained action versions, pinned by commit SHA (see [Reproducibility Rules](#reproducibility-rules))
 - avoid deprecated Node runtimes
 - avoid masking deprecated transitive actions with forced runtime variables
 - validate all data written to `$GITHUB_OUTPUT`
 - validate all data written to `$GITHUB_ENV`
+- never interpolate a GitHub Actions expression (`${{ ... }}`) that can carry external or user-controlled data (workflow inputs, PR titles/bodies, issue text, branch names) directly into a `run:` script; GitHub expands the expression textually before the shell runs, so this is a shell-injection vector regardless of quoting inside the script — pass the value through `env:` first and read it as a quoted shell variable
 - use explicit shell safety settings
 - use timeouts for network operations, including every `curl` invocation
 - set `timeout-minutes` on every job
@@ -538,6 +547,8 @@ Never update `latest` before the versioned tag has been successfully pushed.
 
 Do not publish degraded images unless there is an explicit, documented emergency override.
 
+Publication must be safe to retry after a partial failure (e.g. the versioned manifest pushed but the GitHub Release step failed): a retry must accept already-published artifacts that match the expected digest, treat a conflicting digest at an existing tag as a hard failure, and resume only the stages that did not complete — not recreate or overwrite stages that already succeeded.
+
 ---
 
 # Registry Lifecycle Rules
@@ -551,6 +562,8 @@ Cleanup must:
 - enumerate live tags and protect every digest they reference, including child platform manifests
 - abort the entire prune when the protected list cannot be completed
 - treat 404 as “already gone”, and distinguish it from transient errors before acting
+- re-check, immediately before each delete, that the digest is still unprotected — a tag can be published between enumeration and delete, and the enumerated list is a snapshot, not a lock
+- not run two prunes against the same repository concurrently; serialize them
 
 An incomplete protected list combined with an active delete loop is the only combination that can destroy live tags. A skipped prune costs nothing — the next run cleans up.
 
@@ -662,8 +675,8 @@ The agent must flag violations of this model.
 
 For reproducible releases:
 
-- pin by digest only what ends up in a published artifact; the extractor base is tracked by tag on purpose (see [Extractor Image Rules](#extractor-image-rules))
-- pin third-party GitHub Actions by commit SHA — that is a supply-chain control, not a freshness one, and it is unaffected by the rule above
+- pin by digest only what ends up in a published artifact; the extractor base is tracked by tag on purpose (see [Extractor Image Rules](#extractor-image-rules)) — record its resolved digest and relevant tool versions in failure diagnostics or provenance when troubleshooting a reproducibility mismatch
+- pin every externally referenced GitHub Action to a commit SHA, including first-party and vendor actions — that is a supply-chain control, not a freshness one, and it is unaffected by the rule above; a floating major tag (`@v4`) can change its contents underneath a workflow regardless of who publishes it
 - record upstream version
 - record selected installer URLs
 - record image digests
