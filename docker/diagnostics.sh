@@ -432,12 +432,12 @@ elif ! systemctl is-active --quiet "${PG_UNIT}" 2>/dev/null; then
     row_warn "Databases" "PostgreSQL not running — skipped"
 else
     ALL_DBS_OK=1
-    # Must mirror db_configs in docker/uos-entrypoint.sh (preseed list). A
-    # database the entrypoint creates but this tool never checks is a gap: the
-    # owning service fails with "database does not exist" while diagnostics
-    # reports PostgreSQL as healthy.
+    # Deliberately NOT a mirror of db_configs in docker/uos-entrypoint.sh: the
+    # live cluster under /data is created fresh by pg-cluster-setup, and each
+    # installed service creates its own database there. unifi-credential-server
+    # is not shipped in the image (only ucs-agent), so its databases never exist
+    # and checking them makes every build fail validation.
     for db in "ulp-go" "ulp-go-syslog" "uid" \
-              "unifi-credential-server" "ucs-user-assets" \
               "ucs-agent" "unifi-directory" "unifi-identity-update"; do
         # timeout: psql blocks forever when PostgreSQL is up but wedged (exhausted
         # pool, deadlock) — exactly the state this tool is meant to report on.
